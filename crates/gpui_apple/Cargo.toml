@@ -49,6 +49,7 @@ objc2-core-video = { workspace = true, features = ["CVPixelBuffer", "CVMetalText
 objc2-metal = { version = "0.3.2", default-features = false, features = [
     "std",
     "block2",
+    "objc2-core-foundation",
     "dispatch2",
     "MTLAllocation",
     "MTLBlitCommandEncoder",
