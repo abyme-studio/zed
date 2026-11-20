@@ -250,6 +250,8 @@ pub(crate) struct IosWindowState {
     view: Retained<MetalView>,
     /// The hidden text input view for keyboard input
     text_input_view: Retained<TextInputView>,
+    /// AccessKit's adapter on `view`, once GPUI starts accessibility.
+    a11y: super::a11y::A11y,
     /// Current bounds in pixels
     bounds: Cell<Bounds<Pixels>>,
     /// Scale factor
@@ -425,6 +427,7 @@ impl IosWindow {
             view_controller,
             view,
             text_input_view,
+            a11y: Default::default(),
             bounds: Cell::new(screen_bounds),
             scale_factor: Cell::new(scale_factor),
             input_handler: CallbackSlot::default(),
@@ -840,6 +843,22 @@ impl HasDisplayHandle for IosWindow {
 }
 
 impl PlatformWindow for IosWindow {
+    fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        // Safety: the window state holds the view for as long as its adapter.
+        unsafe {
+            self.a11y
+                .init(Retained::as_ptr(&self.view).cast_mut().cast(), callbacks)
+        };
+    }
+
+    fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
+        self.a11y.update(tree_update);
+    }
+
+    fn a11y_update_window_bounds(&self) {
+        // UIKit reads each element's frame when it asks, through the adapter.
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.bounds.get()
     }

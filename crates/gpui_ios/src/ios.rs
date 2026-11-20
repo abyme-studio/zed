@@ -1,5 +1,6 @@
 //! UIKit-backed implementation details for the iOS GPUI platform.
 
+mod a11y;
 mod application;
 mod display;
 mod events;
