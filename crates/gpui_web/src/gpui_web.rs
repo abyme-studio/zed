@@ -3,7 +3,8 @@
 //! force either backend with `WebBackendPreference`. Opening a second top-level window, or
 //! reopening one after it closes, returns `WebWindowError`. A window opened with a background
 //! other than opaque draws its canvas clear where nothing paints, and `window_canvas` hands the
-//! app the canvas, so the page can hold content under it.
+//! app the canvas, so the page can hold content under it; `window_input` hands it the element that
+//! takes the window's keys.
 
 pub mod canvas_fallback;
 
@@ -53,4 +54,4 @@ pub use logging::init_logging;
 #[cfg(target_family = "wasm")]
 pub use platform::{WebPlatform, WebWindowError};
 #[cfg(target_family = "wasm")]
-pub use window::{WebWindow, window_canvas};
+pub use window::{WebWindow, window_canvas, window_input};
