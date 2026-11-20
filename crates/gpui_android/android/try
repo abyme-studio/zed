@@ -55,6 +55,19 @@ $S exec-out screencap -p >"$OUT/4-scrolled.png"
 # image has TalkBack.
 $S shell uiautomator dump /sdcard/ui.xml >"$OUT/ui-dump.txt" 2>&1 && $S pull /sdcard/ui.xml "$OUT/ui.xml" >/dev/null || true
 $S shell pm list packages | grep -i -E "talkback|accessibility" >"$OUT/talkback.txt" || true
+# TalkBack: a tap puts its focus box on the button it reads, a double tap clicks it through
+# AccessKit (the count goes up). The list scrolled away, so the button is back at the top first.
+TB=com.google.android.marvin.talkback/com.google.android.marvin.talkback.TalkBackService
+$S shell input swipe $((w / 2)) $((h * 30 / 100)) $((w / 2)) $((h * 80 / 100)) 300; sleep 2
+$S shell settings put secure enabled_accessibility_services "$TB"
+$S shell settings put secure accessibility_enabled 1; sleep 6
+$S shell input tap $((w / 4)) $((h * 22 / 100)); sleep 3
+$S exec-out screencap -p >"$OUT/5-talkback-focus.png"
+$S shell input tap $((w / 4)) $((h * 22 / 100)); sleep 0.1; $S shell input tap $((w / 4)) $((h * 22 / 100)); sleep 3
+$S exec-out screencap -p >"$OUT/6-talkback-clicked.png"
+$S shell uiautomator dump /sdcard/ui-talkback.xml >/dev/null 2>&1 && $S pull /sdcard/ui-talkback.xml "$OUT/ui-talkback.xml" >/dev/null || true
+$S shell settings delete secure enabled_accessibility_services
+$S shell settings put secure accessibility_enabled 0
 $S logcat -d >"$OUT/logcat.txt"
 pid=$($S shell pidof "$PKG" | tr -d '\r')
 echo "try: app pid ${pid:-none}; screenshots and logcat in $OUT"

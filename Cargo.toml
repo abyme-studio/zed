@@ -539,6 +539,7 @@ ztracing_macro = { path = "crates/ztracing_macro" }
 #
 
 accesskit = { version = "0.25.2", features = ["enumn"] }
+accesskit_android = { version = "0.9.1", features = ["embedded-dex"] }
 accesskit_ios = "0.2.2"
 accesskit_macos = "0.27.2"
 accesskit_unix = "0.23"
