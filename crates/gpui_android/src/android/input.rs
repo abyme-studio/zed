@@ -186,9 +186,11 @@ fn key_event(app: &AndroidApp, window: &AndroidWindowState, key: &KeyEvent<'_>) 
     let (key_name, key_char) = match key_name(code) {
         Some(name) => (name.to_string(), (name == "space").then(|| " ".to_string())),
         None => {
-            let Some(typed) = character(key.meta_state()) else { return InputStatus::Unhandled };
-            let bare = character(MetaState(0)).unwrap_or(typed);
-            (bare.to_lowercase().to_string(), (!mods.control && !mods.platform).then(|| typed.to_string()))
+            // With ctrl or meta held the map types nothing: the bare key names it then.
+            let typed = character(key.meta_state());
+            let Some(bare) = character(MetaState(0)).or(typed) else { return InputStatus::Unhandled };
+            let key_char = (!mods.control && !mods.platform).then(|| typed.map(|c| c.to_string())).flatten();
+            (bare.to_lowercase().to_string(), key_char)
         }
     };
     let keystroke = Keystroke { modifiers: mods, key: key_name, key_char };
