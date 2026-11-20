@@ -2,7 +2,8 @@
 # Runs the example APK on a headless emulator and checks it draws, types, taps and scrolls.
 #   crates/gpui_android/android/try        (after ./build)
 # Waits until no tart VM and no other emulator runs (one VM slot on this Mac), boots AVD
-# ${AVD:-gpui-android-34} on port 5592 with no window, installs, taps the button, flings the list,
+# ${AVD:-gpui-android-34} on port 5592 with no window, installs, types into the field, taps the
+# button twice, flings the list,
 # and leaves screenshots and logcat in target/android-try/.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -16,7 +17,7 @@ while tart list 2>/dev/null | grep -q ' running$' || pgrep -f qemu-system >/dev/
   echo "try: waiting for the VM slot: a tart VM or an emulator runs"
   sleep 30
 done
-"$SDK/emulator/emulator" -avd "${AVD:-gpui-android-34}" -port 5592 -no-window -no-audio -no-boot-anim -no-snapshot -gpu ${GPU:-host} </dev/null >"$OUT/emulator.log" 2>&1 &
+"$SDK/emulator/emulator" -avd "${AVD:-gpui-android-34}" -port 5592 -no-window -no-audio -no-boot-anim -no-snapshot -gpu ${GPU:-swiftshader_indirect} </dev/null >"$OUT/emulator.log" 2>&1 &
 emu=$!
 trap 'kill $emu 2>/dev/null || true' EXIT
 S="adb -s emulator-5592"
@@ -34,18 +35,14 @@ $S exec-out screencap -p >"$OUT/1-start.png"
 # Every thread's stack, Java and native, to see where a stall is.
 $S shell debuggerd -b "$($S shell pidof "$PKG" | tr -d '\r')" >"$OUT/stacks.txt" 2>&1 || true
 size=$($S shell wm size | sed 's/.*: //' | tr -d '\r'); w=${size%x*}; h=${size#*x}
-d=$($S shell wm density | sed 's/.*: //' | tr -d '\r')
-dp() { echo $(( $1 * d / 160 )); }
-# The field sits under the title (top ~80dp), the button under it (~140dp); the status bar's height
-# comes first while insets are zero.
-top=$(( $(dp 24) ))
-$S shell input tap $((w / 2)) $((top + $(dp 100))); sleep 2
+# Where the field and the button draw on a 1080x2400 screen at 420 dpi, as fractions of its height.
+$S shell input tap $((w / 2)) $((h * 10 / 100)); sleep 2
 $S shell input text "hello%sandroid"; sleep 2
 $S exec-out screencap -p >"$OUT/2-typed.png"
 $S shell dumpsys input_method | grep -E "mInputShown|mShowRequested" | head -3 | tee "$OUT/ime.txt"
 $S shell input keyevent KEYCODE_DEL; sleep 1
-$S shell input tap $((w / 4)) $((top + $(dp 160))); sleep 1
-$S shell input tap $((w / 4)) $((top + $(dp 160))); sleep 2
+$S shell input tap $((w / 4)) $((h * 17 / 100)); sleep 1
+$S shell input tap $((w / 4)) $((h * 17 / 100)); sleep 2
 $S exec-out screencap -p >"$OUT/3-tapped.png"
 $S exec-out screencap -p >"$OUT/2-tapped.png"
 $S shell input swipe $((w / 2)) $((h * 80 / 100)) $((w / 2)) $((h * 30 / 100)) 300; sleep 3
