@@ -326,6 +326,42 @@ impl WgpuRenderer {
                 .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
         };
 
+        Self::new_with_surface(gpu_context, instance, surface, config, compositor_gpu)
+    }
+
+    /// Creates a new WgpuRenderer that draws into a `CAMetalLayer` the caller owns,
+    /// such as the backing layer of an AppKit view.
+    ///
+    /// # Safety
+    /// `layer` must point to a `CAMetalLayer` that outlives the returned renderer.
+    #[cfg(target_vendor = "apple")]
+    pub unsafe fn new_from_layer(
+        gpu_context: GpuContext,
+        layer: *mut std::ffi::c_void,
+        config: WgpuSurfaceConfig,
+    ) -> anyhow::Result<Self> {
+        let instance = gpu_context
+            .borrow()
+            .as_ref()
+            .map(|ctx| ctx.instance.clone())
+            .unwrap_or_else(|| WgpuContext::instance(None));
+        // Safety: the caller guarantees the layer outlives this renderer.
+        let surface = unsafe {
+            instance
+                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer))
+                .map_err(|e| anyhow::anyhow!("Failed to create surface: {e}"))?
+        };
+        Self::new_with_surface(gpu_context, instance, surface, config, None)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn new_with_surface(
+        gpu_context: GpuContext,
+        instance: wgpu::Instance,
+        surface: wgpu::Surface<'static>,
+        config: WgpuSurfaceConfig,
+        compositor_gpu: Option<CompositorGpuHint>,
+    ) -> anyhow::Result<Self> {
         let mut ctx_ref = gpu_context.borrow_mut();
         let surface_configured = ctx_ref.is_none();
         let context = match ctx_ref.as_mut() {
@@ -1072,6 +1108,33 @@ impl WgpuRenderer {
         if let RendererState::Ready { surface, core } = &self.state {
             surface.configure(&core.resources.device, &self.surface_config);
         }
+    }
+
+    /// Asks the compositor to read frames in `color_space`, when the surface supports it.
+    pub fn set_color_space(&mut self, color_space: wgpu::SurfaceColorSpace) {
+        if color_space == self.surface_config.color_space {
+            return;
+        }
+        let RendererState::Ready { surface, core } = &self.state else {
+            return;
+        };
+        let Some(gpu_context) = &self.context else {
+            return;
+        };
+        let supported = gpu_context.borrow().as_ref().is_some_and(|context| {
+            color_space.to_color_spaces().is_some_and(|wanted| {
+                surface
+                    .get_capabilities(&context.adapter)
+                    .color_spaces(self.surface_config.format)
+                    .contains(wanted)
+            })
+        });
+        if !supported {
+            warn!("Surface does not support color space {color_space:?}; keeping the default.");
+            return;
+        }
+        self.surface_config.color_space = color_space;
+        surface.configure(&core.resources.device, &self.surface_config);
     }
 
     pub fn set_subpixel_layout(&mut self, is_bgr: bool) {
@@ -2388,26 +2451,7 @@ impl WgpuHeadlessRenderer {
             return Ok(());
         }
 
-        let texture = self
-            .core
-            .resources
-            .device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("headless_render_target"),
-                size: wgpu::Extent3d {
-                    width: size.width.0 as u32,
-                    height: size.height.0 as u32,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: self.core.target_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.render_target = Some(HeadlessRenderTarget { texture, view });
+        self.render_target = Some(self.core.create_readable_target(size));
         Ok(())
     }
 
@@ -2447,8 +2491,68 @@ impl WgpuHeadlessRenderer {
             .render_target
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
-        let width = target.texture.width();
-        let height = target.texture.height();
+        let image = self.core.read_texture(&target.texture)?;
+        self.check_gpu_errors()?;
+        Ok(image)
+    }
+}
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(test, feature = "bench-support", feature = "test-support")
+))]
+impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
+    fn render_scene_to_image(
+        &mut self,
+        scene: &Scene,
+        size: Size<DevicePixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        self.render(scene, size)?;
+        self.read_image()
+    }
+
+    fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
+        self.render(scene, size)
+    }
+
+    fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        self.core.atlas.clone()
+    }
+}
+
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(test, feature = "bench-support", feature = "test-support")
+))]
+impl WgpuRendererCore {
+    /// Makes an offscreen texture of this core's format that frames can be drawn into
+    /// and read back from.
+    fn create_readable_target(&self, size: Size<DevicePixels>) -> HeadlessRenderTarget {
+        let texture = self
+            .resources
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("headless_render_target"),
+                size: wgpu::Extent3d {
+                    width: size.width.0 as u32,
+                    height: size.height.0 as u32,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        HeadlessRenderTarget { texture, view }
+    }
+
+    /// Copies `texture`, a render target of this core's format, back to the CPU.
+    fn read_texture(&self, texture: &wgpu::Texture) -> anyhow::Result<image::RgbaImage> {
+        let width = texture.width();
+        let height = texture.height();
         let bytes_per_row = width
             .checked_mul(4)
             .ok_or_else(|| anyhow::anyhow!("Headless render target row size overflowed"))?;
@@ -2459,9 +2563,9 @@ impl WgpuHeadlessRenderer {
             .checked_mul(u64::from(height))
             .ok_or_else(|| anyhow::anyhow!("Headless readback buffer size overflowed"))?;
         anyhow::ensure!(
-            buffer_size <= self.core.resources.device.limits().max_buffer_size,
+            buffer_size <= self.resources.device.limits().max_buffer_size,
             "Headless readback buffer size {buffer_size} exceeds maximum buffer size {}",
-            self.core.resources.device.limits().max_buffer_size
+            self.resources.device.limits().max_buffer_size
         );
         let readback_buffer = self
             .core
@@ -2474,7 +2578,7 @@ impl WgpuHeadlessRenderer {
                 mapped_at_creation: false,
             });
         let mut encoder =
-            self.core
+            self
                 .resources
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -2482,7 +2586,7 @@ impl WgpuHeadlessRenderer {
                 });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
+                texture: texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -2514,7 +2618,7 @@ impl WgpuHeadlessRenderer {
                     log::error!("Headless readback receiver was dropped before mapping completed");
                 }
             });
-        self.core
+        self
             .resources
             .device
             .poll(wgpu::PollType::Wait {
@@ -2526,7 +2630,6 @@ impl WgpuHeadlessRenderer {
             .recv_timeout(std::time::Duration::from_secs(30))
             .map_err(|error| anyhow::anyhow!("Failed to receive headless mapping result: {error}"))?
             .map_err(|error| anyhow::anyhow!("Failed to map headless readback buffer: {error}"))?;
-        self.check_gpu_errors()?;
 
         let mapped_data = readback_buffer.slice(..).get_mapped_range()?;
         let pixel_capacity = usize::try_from(u64::from(bytes_per_row) * u64::from(height))
@@ -2541,7 +2644,7 @@ impl WgpuHeadlessRenderer {
         drop(mapped_data);
         readback_buffer.unmap();
 
-        if self.core.target_format == wgpu::TextureFormat::Bgra8Unorm {
+        if self.target_format == wgpu::TextureFormat::Bgra8Unorm {
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
@@ -2552,26 +2655,26 @@ impl WgpuHeadlessRenderer {
     }
 }
 
-#[cfg(all(
-    not(target_family = "wasm"),
-    any(test, feature = "bench-support", feature = "test-support")
-))]
-impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
-    fn render_scene_to_image(
-        &mut self,
-        scene: &Scene,
-        size: Size<DevicePixels>,
-    ) -> anyhow::Result<image::RgbaImage> {
-        self.render(scene, size)?;
-        self.read_image()
-    }
-
-    fn render_scene(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
-        self.render(scene, size)
-    }
-
-    fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
-        self.core.atlas.clone()
+#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+impl WgpuRenderer {
+    /// Draws `scene` into a texture of its own at the surface's size and reads it back,
+    /// without presenting: for visual tests of a window.
+    pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        let size = self.viewport_size();
+        let premultiplied_alpha =
+            self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        let core = self
+            .core_mut()
+            .ok_or_else(|| anyhow::anyhow!("render_to_image needs the renderer's GPU resources"))?;
+        let target = core.create_readable_target(size);
+        core.render_frame(
+            scene,
+            &target.view,
+            size,
+            premultiplied_alpha,
+            wgpu::Color::TRANSPARENT,
+        )?;
+        core.read_texture(&target.texture)
     }
 }
 

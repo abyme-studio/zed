@@ -1108,7 +1108,10 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
+            // A renderer without a layer for `CAMetalDisplayLink` takes its own drawables, and
+            // its frames are paced by the `CVDisplayLink` instead.
+            let metal_frames = (MetalFrameSource::is_available() && renderer.layer().is_some())
+                .then(Rc::<MetalFrames>::default);
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
