@@ -1,4 +1,5 @@
 use crate::metal_atlas::MetalAtlas;
+use crate::metal_blur::Backdrop;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
@@ -14,8 +15,8 @@ use objc2_core_video::{
     CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBufferGetHeight,
     CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
     CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_32BGRA,
-    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-    kCVReturnSuccess,
+    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVReturnSuccess,
 };
 use objc2_foundation::{NSRange, NSString};
 #[cfg(target_os = "macos")]
@@ -25,7 +26,7 @@ use objc2_metal::{
     MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCreateSystemDefaultDevice,
     MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLGPUFamily,
     MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResource,
     MTLResourceOptions, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
     MTLTextureUsage, MTLViewport,
 };
@@ -150,6 +151,8 @@ pub struct MetalRenderer {
     video_surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// One plane of `32BGRA` (a remote surface's IOSurface), sampled as it is.
     bgra_surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// The backdrop blur's passes and textures.
+    backdrop: Backdrop,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
     core_video_texture_cache: CFRetained<CVMetalTextureCache>,
@@ -395,6 +398,8 @@ impl MetalRenderer {
             true,
         )?;
 
+        let backdrop = Backdrop::new(&device, &library, MTLPixelFormat::BGRA8Unorm)?;
+
         let command_queue = device.newCommandQueue().context("creating command queue")?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
@@ -439,6 +444,7 @@ impl MetalRenderer {
             depth_texture: None,
             video_surfaces_pipeline_state,
             bgra_surfaces_pipeline_state,
+            backdrop,
             instance_buffer_pool,
             sprite_atlas,
             core_video_texture_cache,
@@ -795,37 +801,35 @@ impl MetalRenderer {
             .commandBuffer()
             .context("creating command buffer")?;
         let alpha = if self.opaque { 1. } else { 0. };
-        let depth_texture = self.depth_texture_matching(texture)?;
+        // A blur reads what is drawn under it, so a pass ends at each blur and the opaque quads
+        // are drawn in parts, each up to the next blur, with the depth kept between passes.
+        let blur_cuts = scene.backdrop_blur_quad_cuts();
+        let depth_texture = self.depth_texture_matching(texture, !blur_cuts.is_empty())?;
+        let quad_count = scene.quads.len();
+        let depth_scale = quad_depth_scale(quad_count);
 
-        let command_encoder = new_command_encoder_for_texture(
+        let mut command_encoder = new_command_encoder_for_texture(
             &command_buffer,
             texture,
             &depth_texture,
             viewport_size,
-            MTLClearColor {
+            Some(MTLClearColor {
                 red: 0.,
                 green: 0.,
                 blue: 0.,
                 alpha,
-            },
+            }),
+            !blur_cuts.is_empty(),
         )?;
-        let depth_scale = quad_depth_scale(scene.quads.len());
-        // SAFETY: Metal copies both values, which match every vertex shader's
-        // `GlobalInputIndex_ViewportSize` and `GlobalInputIndex_DepthScale` arguments.
-        unsafe {
-            command_encoder.setVertexBytes_length_atIndex(
-                ptr::NonNull::from(&viewport_size).cast(),
-                mem::size_of_val(&viewport_size),
-                GlobalInputIndex::ViewportSize as usize,
-            );
-            command_encoder.setVertexBytes_length_atIndex(
-                ptr::NonNull::from(&depth_scale).cast(),
-                mem::size_of_val(&depth_scale),
-                GlobalInputIndex::DepthScale as usize,
-            );
-        }
-
-        self.draw_opaque_quads(scene.quads.len(), instance_bindings, &command_encoder);
+        set_pass_globals(&command_encoder, viewport_size, depth_scale);
+        let mut opaque_end = blur_cuts.first().copied().unwrap_or(quad_count);
+        let mut blur_cut = 0;
+        self.draw_opaque_quads(
+            0..opaque_end,
+            quad_count,
+            instance_bindings,
+            &command_encoder,
+        );
         command_encoder.setDepthStencilState(Some(&self.depth_test_state));
 
         let mut quad_cursor: u32 = 0;
@@ -900,6 +904,37 @@ impl MetalRenderer {
                 PrimitiveBatch::NativeViews(range) => {
                     self.draw_native_views(range, instance_bindings, &command_encoder)
                 }
+                PrimitiveBatch::BackdropBlurs(range) => {
+                    command_encoder.endEncoding();
+                    for blur in &scene.backdrop_blurs[range] {
+                        self.backdrop.run(
+                            &self.device,
+                            blur,
+                            texture,
+                            viewport_size,
+                            &command_buffer,
+                        )?;
+                    }
+                    command_encoder = new_command_encoder_for_texture(
+                        &command_buffer,
+                        texture,
+                        &depth_texture,
+                        viewport_size,
+                        None,
+                        true,
+                    )?;
+                    set_pass_globals(&command_encoder, viewport_size, depth_scale);
+                    blur_cut += 1;
+                    let opaque_start = opaque_end;
+                    opaque_end = blur_cuts.get(blur_cut).copied().unwrap_or(quad_count);
+                    self.draw_opaque_quads(
+                        opaque_start..opaque_end,
+                        quad_count,
+                        instance_bindings,
+                        &command_encoder,
+                    );
+                    command_encoder.setDepthStencilState(Some(&self.depth_test_state));
+                }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
@@ -909,13 +944,18 @@ impl MetalRenderer {
         Ok(command_buffer)
     }
 
+    /// A depth buffer the size of `target`. One `kept` across passes, as a frame with a backdrop
+    /// blur needs, is never memoryless.
     fn depth_texture_matching(
         &mut self,
         target: &ProtocolObject<dyn MTLTexture>,
+        kept: bool,
     ) -> Result<Retained<ProtocolObject<dyn MTLTexture>>> {
+        let memoryless = self.is_apple_gpu && !kept;
         if let Some(depth_texture) = &self.depth_texture
             && depth_texture.width() == target.width()
             && depth_texture.height() == target.height()
+            && (depth_texture.storageMode() == MTLStorageMode::Memoryless) == memoryless
         {
             return Ok(depth_texture.clone());
         }
@@ -929,7 +969,7 @@ impl MetalRenderer {
         descriptor.setUsage(MTLTextureUsage::RenderTarget);
         // The depth buffer never leaves its render pass, so Apple GPUs can keep
         // it in tile memory without allocating any backing store.
-        descriptor.setStorageMode(if self.is_apple_gpu {
+        descriptor.setStorageMode(if memoryless {
             MTLStorageMode::Memoryless
         } else {
             MTLStorageMode::Private
@@ -942,13 +982,16 @@ impl MetalRenderer {
         Ok(depth_texture)
     }
 
+    /// Draws the opaque rectangles among `quads`, front to back. The shader takes instance `i` as
+    /// quad `quad_count - 1 - i`, so the range is drawn by its instances counted from the end.
     fn draw_opaque_quads(
         &self,
+        quads: Range<usize>,
         quad_count: usize,
         instance_bindings: &InstanceBindings,
         command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
     ) {
-        if quad_count == 0 {
+        if quads.is_empty() {
             return;
         }
         let quad_count_value = quad_count as u32;
@@ -972,8 +1015,8 @@ impl MetalRenderer {
                 MTLPrimitiveType::TriangleStrip,
                 0,
                 4,
-                quad_count,
-                0,
+                quads.len(),
+                quad_count - quads.end,
             );
         }
     }
@@ -1306,7 +1349,10 @@ impl MetalRenderer {
             let plane_texture = |plane, format| -> Result<CFRetained<CVMetalTexture>> {
                 // A one-plane buffer has no planes to CoreVideo: its size is the buffer's.
                 let (width, height) = if planes == 1 {
-                    (CVPixelBufferGetWidth(image_buffer), CVPixelBufferGetHeight(image_buffer))
+                    (
+                        CVPixelBufferGetWidth(image_buffer),
+                        CVPixelBufferGetHeight(image_buffer),
+                    )
                 } else {
                     (
                         CVPixelBufferGetWidthOfPlane(image_buffer, plane),
@@ -1401,7 +1447,8 @@ fn new_command_encoder_for_texture(
     texture: &ProtocolObject<dyn MTLTexture>,
     depth_texture: &ProtocolObject<dyn MTLTexture>,
     viewport_size: Size<DevicePixels>,
-    clear_color: MTLClearColor,
+    clear_color: Option<MTLClearColor>,
+    store_depth: bool,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>> {
     let render_pass_descriptor = MTLRenderPassDescriptor::new();
     // SAFETY: Index zero is within the render pass's color attachment array.
@@ -1412,15 +1459,29 @@ fn new_command_encoder_for_texture(
     };
     color_attachment.setTexture(Some(texture));
     color_attachment.setStoreAction(MTLStoreAction::Store);
-    color_attachment.setLoadAction(MTLLoadAction::Clear);
-    color_attachment.setClearColor(clear_color);
+    // With no clear color the pass goes on drawing over what an earlier pass drew.
+    match clear_color {
+        Some(clear_color) => {
+            color_attachment.setLoadAction(MTLLoadAction::Clear);
+            color_attachment.setClearColor(clear_color);
+        }
+        None => color_attachment.setLoadAction(MTLLoadAction::Load),
+    }
 
     let depth_attachment = render_pass_descriptor.depthAttachment();
     depth_attachment.setTexture(Some(depth_texture));
-    depth_attachment.setLoadAction(MTLLoadAction::Clear);
-    depth_attachment.setClearDepth(0.0);
-    // The depth buffer is only needed within this pass.
-    depth_attachment.setStoreAction(MTLStoreAction::DontCare);
+    if clear_color.is_some() {
+        depth_attachment.setLoadAction(MTLLoadAction::Clear);
+        depth_attachment.setClearDepth(0.0);
+    } else {
+        depth_attachment.setLoadAction(MTLLoadAction::Load);
+    }
+    // The depth buffer is only needed within this pass, unless a later pass goes on from it.
+    depth_attachment.setStoreAction(if store_depth {
+        MTLStoreAction::Store
+    } else {
+        MTLStoreAction::DontCare
+    });
 
     let command_encoder = command_buffer
         .renderCommandEncoderWithDescriptor(&render_pass_descriptor)
@@ -1503,6 +1564,28 @@ fn build_pipeline_state(
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .with_context(|| format!("creating {label} render pipeline"))
+}
+
+/// The values every vertex shader reads, set again on each pass of a frame.
+fn set_pass_globals(
+    command_encoder: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+    viewport_size: Size<DevicePixels>,
+    depth_scale: f32,
+) {
+    // SAFETY: Metal copies both values, which match every vertex shader's
+    // `GlobalInputIndex_ViewportSize` and `GlobalInputIndex_DepthScale` arguments.
+    unsafe {
+        command_encoder.setVertexBytes_length_atIndex(
+            ptr::NonNull::from(&viewport_size).cast(),
+            mem::size_of_val(&viewport_size),
+            GlobalInputIndex::ViewportSize as usize,
+        );
+        command_encoder.setVertexBytes_length_atIndex(
+            ptr::NonNull::from(&depth_scale).cast(),
+            mem::size_of_val(&depth_scale),
+            GlobalInputIndex::DepthScale as usize,
+        );
+    }
 }
 
 fn build_depth_stencil_state(
@@ -1801,7 +1884,11 @@ mod tests {
     use objc2_metal::MTLCommandBufferStatus;
 
     /// A 16×16 buffer of `format`, each plane filled by `fill(plane, row)`, drawn headless.
-    fn draw_buffer(format: u32, planes: usize, fill: impl Fn(usize, &mut [u8])) -> image::RgbaImage {
+    fn draw_buffer(
+        format: u32,
+        planes: usize,
+        fill: impl Fn(usize, &mut [u8]),
+    ) -> image::RgbaImage {
         let surface_properties_key = unsafe { kCVPixelBufferIOSurfacePropertiesKey };
         let attributes = CFDictionary::from_slices(
             &[surface_properties_key],
@@ -1821,7 +1908,8 @@ mod tests {
             },
             kCVReturnSuccess
         );
-        let image_buffer = unsafe { CFRetained::from_raw(ptr::NonNull::new(image_buffer).unwrap()) };
+        let image_buffer =
+            unsafe { CFRetained::from_raw(ptr::NonNull::new(image_buffer).unwrap()) };
         unsafe {
             assert_eq!(
                 CVPixelBufferLockBaseAddress(&image_buffer, CVPixelBufferLockFlags::empty()),
@@ -1890,19 +1978,25 @@ mod tests {
 
     #[test]
     fn a_video_range_surface_draws_white_and_red_by_bt709() {
-        let white = draw_buffer(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 2, |plane, row| {
-            row.fill(if plane == 0 { 235 } else { 128 })
-        });
+        let white = draw_buffer(
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            2,
+            |plane, row| row.fill(if plane == 0 { 235 } else { 128 }),
+        );
         every_pixel_is(&white, [255, 255, 255, 255]);
-        let red = draw_buffer(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, 2, |plane, row| {
-            if plane == 0 {
-                row.fill(63);
-            } else {
-                for cb_cr in row.chunks_exact_mut(2) {
-                    cb_cr.copy_from_slice(&[102, 240]);
+        let red = draw_buffer(
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            2,
+            |plane, row| {
+                if plane == 0 {
+                    row.fill(63);
+                } else {
+                    for cb_cr in row.chunks_exact_mut(2) {
+                        cb_cr.copy_from_slice(&[102, 240]);
+                    }
                 }
-            }
-        });
+            },
+        );
         every_pixel_is(&red, [255, 0, 0, 255]);
     }
 

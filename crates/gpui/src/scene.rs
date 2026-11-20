@@ -65,6 +65,7 @@ pub struct Scene {
     pub surfaces: Vec<PaintSurface>,
     pub native_views: Vec<PaintNativeView>,
     animations: Vec<SpriteAnimation>,
+    pub backdrop_blurs: Vec<BackdropBlur>,
 }
 
 #[expect(missing_docs)]
@@ -84,6 +85,7 @@ impl Scene {
         self.surfaces.clear();
         self.native_views.clear();
         self.animations.clear();
+        self.backdrop_blurs.clear();
     }
 
     /// Inserts a sprite that [`Self::advance_animations`] keeps moving. The
@@ -280,6 +282,9 @@ impl Scene {
                 order,
                 ..native_view
             }),
+            Primitive::BackdropBlur(blur) => {
+                self.backdrop_blurs.push(BackdropBlur { order, ..blur })
+            }
         }
     }
 
@@ -301,6 +306,25 @@ impl Scene {
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
+    }
+
+    /// How many quads come before each batch of backdrop blurs, in draw order. A renderer that
+    /// draws opaque quads ahead of the rest draws them in parts cut here, so a quad above a blur
+    /// is not under it.
+    pub fn backdrop_blur_quad_cuts(&self) -> Vec<usize> {
+        if self.backdrop_blurs.is_empty() {
+            return Vec::new();
+        }
+        let mut quads = 0;
+        let mut cuts = Vec::new();
+        for batch in self.batches() {
+            match batch {
+                PrimitiveBatch::Quads(range) => quads = range.end,
+                PrimitiveBatch::BackdropBlurs(_) => cuts.push(quads),
+                _ => {}
+            }
+        }
+        cuts
     }
 
     pub fn finish(&mut self) {
@@ -338,6 +362,7 @@ impl Scene {
                 }
             }
         }
+        self.backdrop_blurs.sort_by_key(|blur| blur.order);
     }
 
     #[cfg_attr(
@@ -367,6 +392,8 @@ impl Scene {
             surfaces_iter: self.surfaces.iter().peekable(),
             native_views_start: 0,
             native_views_iter: self.native_views.iter().peekable(),
+            backdrop_blurs_start: 0,
+            backdrop_blurs_iter: self.backdrop_blurs.iter().peekable(),
         }
     }
 }
@@ -440,6 +467,7 @@ pub(crate) enum PrimitiveKind {
     SubpixelSprite,
     PolychromeSprite,
     Surface,
+    BackdropBlur,
     NativeView,
 }
 
@@ -478,6 +506,7 @@ pub enum Primitive {
     PolychromeSprite(PolychromeSprite),
     Surface(PaintSurface),
     NativeView(PaintNativeView),
+    BackdropBlur(BackdropBlur),
 }
 
 #[expect(missing_docs)]
@@ -493,6 +522,7 @@ impl Primitive {
             Primitive::PolychromeSprite(_) => PrimitiveKind::PolychromeSprite,
             Primitive::Surface(_) => PrimitiveKind::Surface,
             Primitive::NativeView(_) => PrimitiveKind::NativeView,
+            Primitive::BackdropBlur(_) => PrimitiveKind::BackdropBlur,
         }
     }
 
@@ -507,6 +537,7 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
             Primitive::NativeView(native_view) => &native_view.bounds,
+            Primitive::BackdropBlur(blur) => &blur.bounds,
         }
     }
 
@@ -535,6 +566,7 @@ impl Primitive {
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
             Primitive::NativeView(native_view) => &native_view.content_mask,
+            Primitive::BackdropBlur(blur) => &blur.content_mask,
         }
     }
 }
@@ -565,6 +597,8 @@ struct BatchIterator<'a> {
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
     native_views_start: usize,
     native_views_iter: Peekable<slice::Iter<'a, PaintNativeView>>,
+    backdrop_blurs_start: usize,
+    backdrop_blurs_iter: Peekable<slice::Iter<'a, BackdropBlur>>,
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
@@ -606,6 +640,10 @@ impl<'a> Iterator for BatchIterator<'a> {
                     .peek()
                     .map(|native_view| native_view.order),
                 PrimitiveKind::NativeView,
+            ),
+            (
+                self.backdrop_blurs_iter.peek().map(|b| b.order),
+                PrimitiveKind::BackdropBlur,
             ),
         ];
         orders_and_kinds.sort_by_key(|(order, kind)| (order.unwrap_or(u32::MAX), *kind));
@@ -768,6 +806,20 @@ impl<'a> Iterator for BatchIterator<'a> {
                     native_views_start..native_views_end,
                 ))
             }
+            PrimitiveKind::BackdropBlur => {
+                let blurs_start = self.backdrop_blurs_start;
+                let mut blurs_end = blurs_start + 1;
+                self.backdrop_blurs_iter.next();
+                while self
+                    .backdrop_blurs_iter
+                    .next_if(|blur| (blur.order, batch_kind) < max_order_and_kind)
+                    .is_some()
+                {
+                    blurs_end += 1;
+                }
+                self.backdrop_blurs_start = blurs_end;
+                Some(PrimitiveBatch::BackdropBlurs(blurs_start..blurs_end))
+            }
         }
     }
 }
@@ -801,6 +853,8 @@ pub enum PrimitiveBatch {
     },
     Surfaces(Range<usize>),
     NativeViews(Range<usize>),
+    /// Blurs of what is drawn under each, in order: a renderer ends its pass at one.
+    BackdropBlurs(Range<usize>),
 }
 
 impl PrimitiveBatch {
@@ -834,6 +888,7 @@ impl PrimitiveBatch {
             }
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
             Self::NativeViews(range) => format!("native views ({})", range.len()),
+            Self::BackdropBlurs(range) => format!("backdrop blurs ({})", range.len()),
         }
     }
 }
@@ -908,6 +963,8 @@ pub enum BorderStyle {
     Solid = 0,
     /// A dashed border.
     Dashed = 1,
+    /// A dotted border: round dots as wide as the border, one dot's width apart.
+    Dotted = 2,
 }
 
 /// A data type representing a 2 dimensional transformation that can be applied to an element.
@@ -1139,6 +1196,26 @@ pub struct PolychromeSprite {
 impl From<PolychromeSprite> for Primitive {
     fn from(sprite: PolychromeSprite) -> Self {
         Primitive::PolychromeSprite(sprite)
+    }
+}
+
+/// A blur of what is already drawn inside `bounds` and its corners, by `radius` (CSS's
+/// `backdrop-filter: blur()`, whose radius is the blur's standard deviation). A renderer that
+/// cannot read back its target leaves what is under it unblurred.
+#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+#[expect(missing_docs)]
+pub struct BackdropBlur {
+    pub order: DrawOrder,
+    pub radius: ScaledPixels,
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+}
+
+impl From<BackdropBlur> for Primitive {
+    fn from(blur: BackdropBlur) -> Self {
+        Primitive::BackdropBlur(blur)
     }
 }
 

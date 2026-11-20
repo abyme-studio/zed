@@ -760,7 +760,7 @@ dependencies = [
  "ndk-sys",
  "num_enum",
  "simd_cesu8",
- "thiserror 2.0.17",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
