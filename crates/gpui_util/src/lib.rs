@@ -166,15 +166,18 @@ pub fn post_inc<T: From<u8> + AddAssign<T> + Copy>(value: &mut T) -> T {
     prev
 }
 
-pub fn measure<R>(label: &str, f: impl FnOnce() -> R) -> R {
+/// Whether `ZED_MEASUREMENTS` is set, so timings are printed.
+pub fn measuring() -> bool {
     static ZED_MEASUREMENTS: OnceLock<bool> = OnceLock::new();
-    let zed_measurements = ZED_MEASUREMENTS.get_or_init(|| {
+    *ZED_MEASUREMENTS.get_or_init(|| {
         env::var("ZED_MEASUREMENTS")
             .map(|measurements| measurements == "1" || measurements == "true")
             .unwrap_or(false)
-    });
+    })
+}
 
-    if *zed_measurements {
+pub fn measure<R>(label: &str, f: impl FnOnce() -> R) -> R {
+    if measuring() {
         let start = Instant::now();
         let result = f();
         let elapsed = start.elapsed();

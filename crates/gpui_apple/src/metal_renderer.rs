@@ -637,9 +637,18 @@ impl MetalRenderer {
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let frame_resources = Cell::new(Some((writer.finish(), surface_textures)));
         let block = RcBlock::new(
-            move |_: ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            move |buffer: ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
                 if let Some((instance_buffer, _surface_textures)) = frame_resources.take() {
                     instance_buffer_pool.lock().release(instance_buffer);
+                }
+                // With ZED_MEASUREMENTS, the GPU's own time for the frame, beside `frame duration`'s CPU time.
+                if gpui_util::measuring() {
+                    // SAFETY: Metal passes the completed command buffer, alive for the handler's call.
+                    let buffer = unsafe { buffer.as_ref() };
+                    let seconds = buffer.GPUEndTime() - buffer.GPUStartTime();
+                    if seconds > 0.0 {
+                        eprintln!("gpu duration: {:?}", std::time::Duration::from_secs_f64(seconds));
+                    }
                 }
             },
         );
