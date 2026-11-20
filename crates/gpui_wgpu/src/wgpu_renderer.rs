@@ -330,6 +330,11 @@ pub struct WgpuRenderer {
     observed_error_generation: u64,
     last_surface_error: Option<String>,
     needs_redraw: bool,
+    /// The caller draws into the layer's drawables itself (`draw_to_drawable`), so a size,
+    /// alpha or colour change leaves the surface as it was first configured: Core Animation
+    /// raises an exception at `setMaximumDrawableCount` on a layer a `CAMetalDisplayLink`
+    /// drives, which wgpu's configure calls.
+    layer_drawables: bool,
 }
 
 impl WgpuRenderer {
@@ -619,6 +624,7 @@ impl WgpuRenderer {
             observed_error_generation: 0,
             last_surface_error: None,
             needs_redraw: false,
+            layer_drawables: false,
         })
     }
 }
@@ -1185,9 +1191,30 @@ impl WgpuRenderer {
         // panics when the device/surface is in an invalid state during resize.
         resources.invalidate_intermediate_textures();
 
+        self.reconfigure_surface();
+    }
+
+    /// Applies `surface_config` to the surface, unless the caller draws into the layer's
+    /// drawables itself (`draw_into_layer_drawables`).
+    fn reconfigure_surface(&self) {
+        if self.layer_drawables {
+            return;
+        }
         if let RendererState::Ready { surface, core } = &self.state {
             surface.configure(&core.resources.device, &self.surface_config);
         }
+    }
+
+    /// From now on every frame is drawn by `draw_to_drawable` into a drawable of the layer
+    /// the surface was made on, and the surface is never configured again: the caller sets
+    /// the layer's drawable size and opacity (`is_opaque`) itself.
+    pub fn draw_into_layer_drawables(&mut self) {
+        self.layer_drawables = true;
+    }
+
+    /// Whether frames are drawn opaque, the surface's alpha mode after `update_transparency`.
+    pub fn is_opaque(&self) -> bool {
+        self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::Opaque
     }
 
     /// Asks the compositor to read frames in `color_space`, when the surface supports it.
@@ -1214,7 +1241,7 @@ impl WgpuRenderer {
             return;
         }
         self.surface_config.color_space = color_space;
-        surface.configure(&core.resources.device, &self.surface_config);
+        self.reconfigure_surface();
     }
 
     pub fn set_subpixel_layout(&mut self, is_bgr: bool) {
@@ -1251,9 +1278,7 @@ impl WgpuRenderer {
             precompiled_shaders_enabled(&resources.device),
         );
 
-        if let RendererState::Ready { surface, core } = &self.state {
-            surface.configure(&core.resources.device, &self.surface_config);
-        }
+        self.reconfigure_surface();
     }
 
     #[allow(dead_code)]

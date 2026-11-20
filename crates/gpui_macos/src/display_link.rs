@@ -789,6 +789,29 @@ mod tests {
         renderer.draw(&gpui::Scene::default());
     }
 
+    // A live resize: Core Animation raises an exception when a layer a link drives is given
+    // a `maximumDrawableCount`, as wgpu's surface configure does, and the abort comes at
+    // `set_frame_size`'s `extern "C"` frame.
+    #[test]
+    fn a_renderer_resizes_and_draws_detached_while_a_display_link_holds_its_layer() {
+        if !MetalFrameSource::is_available() {
+            return;
+        }
+        let mut renderer =
+            crate::renderer::new_renderer(Default::default(), false, false).unwrap();
+        renderer.update_drawable_size(gpui::size(gpui::DevicePixels(64), gpui::DevicePixels(64)));
+        let layer = renderer.layer().expect("window renderer has a layer");
+        let link = CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), layer);
+        renderer.set_display_link_attached(false);
+        renderer.set_presents_with_transaction(true);
+        renderer.update_drawable_size(gpui::size(gpui::DevicePixels(96), gpui::DevicePixels(48)));
+        renderer.update_transparency(true);
+        renderer.draw(&gpui::Scene::default());
+        let drawable_size = renderer.layer().unwrap().drawableSize();
+        assert_eq!((drawable_size.width, drawable_size.height), (96.0, 48.0));
+        link.invalidate();
+    }
+
     #[test]
     fn host_timestamp_preserves_request_age_at_different_clock_rates() {
         let received_at = Instant::now();

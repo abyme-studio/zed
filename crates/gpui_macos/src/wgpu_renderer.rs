@@ -5,12 +5,16 @@
 //! The renderer owns the view's backing `CAMetalLayer`, as `MetalRenderer` does, and wgpu draws
 //! into it. While a `CAMetalDisplayLink` drives the layer, each frame is drawn into the drawable
 //! the link hands out, so a draw never waits in `nextDrawable`; detached (a live resize's
-//! synchronous draws), wgpu takes one from the layer itself.
+//! synchronous draws), it takes one from the layer. wgpu never presents to the layer nor
+//! configures it after it is made: Core Animation raises an exception when wgpu's configure
+//! sets `maximumDrawableCount` on a layer a display link drives, so this renderer sets the
+//! layer's drawable size and opacity itself.
 
 use anyhow::Result;
 use gpui::{DevicePixels, Scene, Size, size};
 use gpui_wgpu::{GpuContext, WgpuAtlas, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_core_foundation::CGSize;
 use objc2_quartz_core::{CAAutoresizingMask, CAMetalDrawable, CAMetalLayer};
 use std::sync::Arc;
 
@@ -54,6 +58,7 @@ impl WgpuMacRenderer {
         if use_display_p3 {
             renderer.set_color_space(wgpu::SurfaceColorSpace::DisplayP3);
         }
+        renderer.draw_into_layer_drawables();
         Ok(Self {
             renderer,
             display_link_mode: DisplayLinkMode::Detached,
@@ -118,10 +123,16 @@ impl WgpuMacRenderer {
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
         self.renderer.update_drawable_size(size);
+        let size = self.renderer.viewport_size();
+        self.layer.setDrawableSize(CGSize::new(
+            size.width.0 as f64,
+            size.height.0 as f64,
+        ));
     }
 
     pub fn update_transparency(&mut self, transparent: bool) {
         self.renderer.update_transparency(transparent);
+        self.layer.setOpaque(self.renderer.is_opaque());
     }
 
     pub fn destroy(&mut self) {
@@ -139,7 +150,12 @@ impl WgpuMacRenderer {
                     .draw_to_drawable(scene, &drawable, self.presents_with_transaction);
             }
             DisplayLinkMode::Detached => {
-                self.renderer.draw(scene);
+                let Some(drawable) = self.layer.nextDrawable() else {
+                    log::error!("the layer gave no drawable; the frame was skipped");
+                    return;
+                };
+                self.renderer
+                    .draw_to_drawable(scene, &drawable, self.presents_with_transaction);
             }
         }
     }
