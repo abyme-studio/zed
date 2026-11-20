@@ -1,8 +1,8 @@
 use crate::{
-    BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
-    TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
-    kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
-    ns_string, renderer,
+    BoolExt, LinkFrames, MacDisplay, MetalFrames, NSRange, NSStringExt,
+    TISCopyCurrentKeyboardInputSource, TISGetInputSourceProperty,
+    events::platform_input_from_native, kTISPropertyInputSourceIsASCIICapable,
+    kTISPropertyInputSourceType, kTISTypeKeyboardInputMode, ns_string, renderer,
 };
 use anyhow::Result;
 use block2::RcBlock;
@@ -643,8 +643,25 @@ unsafe fn apply_simple_fullscreen_plan(
 enum FrameSource {
     /// macOS 14+: a `CAMetalDisplayLink` that hands out each frame's drawable.
     Metal(Rc<MetalFrames>),
-    /// Earlier systems: the shared `CVDisplayLink` registry, joined on first start.
-    DisplayLink(Option<WindowFrameSource>),
+    /// Earlier systems, and renderers that take their own drawables: the
+    /// shared `CVDisplayLink` registry, joined on first start.
+    DisplayLink(Rc<LinkFrames>),
+}
+
+/// A window's frames, kept outside the lock so waking never waits on it.
+#[derive(Clone)]
+enum Frames {
+    Metal(Rc<MetalFrames>),
+    Link(Rc<LinkFrames>),
+}
+
+impl Frames {
+    fn wake(&self) {
+        match self {
+            Frames::Metal(frames) => frames.wake(),
+            Frames::Link(frames) => frames.wake(),
+        }
+    }
 }
 
 struct MacWindowState {
@@ -853,17 +870,14 @@ impl MacWindowState {
                     self.renderer.set_display_link_attached(true);
                 }
             }
-            FrameSource::DisplayLink(frame_source) => {
+            FrameSource::DisplayLink(link_frames) => {
                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
                 let Some(display_id) = display_id_for_screen(screen) else {
                     // AppKit can temporarily report no screen while displays are being reconfigured.
                     return;
                 };
                 let data = self.native_view.as_ptr() as *mut c_void;
-                frame_source
-                    .get_or_insert_with(|| WindowFrameSource::new(data, step))
-                    .start(display_id)
-                    .log_err();
+                link_frames.start(display_id, data, step).log_err();
             }
         }
     }
@@ -878,8 +892,7 @@ impl MacWindowState {
                     self.renderer.set_display_link_attached(false);
                 }
             }
-            FrameSource::DisplayLink(Some(frame_source)) => frame_source.stop(),
-            FrameSource::DisplayLink(None) => {}
+            FrameSource::DisplayLink(link_frames) => link_frames.stop(),
         }
     }
 
@@ -976,9 +989,8 @@ impl MacWindowState {
 pub(crate) struct MacWindow(
     Rc<Mutex<MacWindowState>>,
     MainThreadMarker,
-    /// The Metal link's frame waker, kept outside the lock so waking never
-    /// waits on it. `None` when a `CVDisplayLink` paces frames.
-    Option<Rc<MetalFrames>>,
+    /// The window's frames, for GPUI's frame waker.
+    Frames,
 );
 
 impl MacWindow {
@@ -1110,8 +1122,11 @@ impl MacWindow {
 
             // A renderer without a layer for `CAMetalDisplayLink` takes its own drawables, and
             // its frames are paced by the `CVDisplayLink` instead.
-            let metal_frames = (MetalFrameSource::is_available() && renderer.layer().is_some())
-                .then(Rc::<MetalFrames>::default);
+            let frames = if MetalFrameSource::is_available() && renderer.layer().is_some() {
+                Frames::Metal(Rc::default())
+            } else {
+                Frames::Link(Rc::default())
+            };
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -1122,9 +1137,9 @@ impl MacWindow {
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
-                frame_source: match &metal_frames {
-                    Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
-                    None => FrameSource::DisplayLink(None),
+                frame_source: match &frames {
+                    Frames::Metal(metal_frames) => FrameSource::Metal(metal_frames.clone()),
+                    Frames::Link(link_frames) => FrameSource::DisplayLink(link_frames.clone()),
                 },
                 renderer,
                 request_frame_callback: None,
@@ -1169,7 +1184,7 @@ impl MacWindow {
                 accesskit_adapter: None,
                 sheet_parent: None,
             }));
-            let mut window = Self(state, marker, metal_frames);
+            let mut window = Self(state, marker, frames);
 
             (*native_window)
                 .class()
@@ -1417,7 +1432,7 @@ impl Drop for MacWindow {
         let sheet_parent = this.sheet_parent.take();
         match &mut this.frame_source {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
-            FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
+            FrameSource::DisplayLink(link_frames) => link_frames.close(),
         }
         unsafe {
             let _: () = msg_send![this.native_window, setDelegate: ptr::null_mut::<AnyObject>()];
@@ -2149,23 +2164,37 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
-    }
-
-    // GPUI calls this without waking the frame waker when a window only needs
-    // a present, so a paused Metal link must resume here too.
-    fn schedule_frame(&self) {
-        if let Some(metal_frames) = &self.2 {
-            metal_frames.wake();
+        if let Frames::Link(link_frames) = &self.2 {
+            link_frames.drew();
         }
     }
 
+    // GPUI calls this without waking the frame waker when a window only needs
+    // a present, so a paused link must resume here too.
+    fn schedule_frame(&self) {
+        self.2.wake();
+    }
+
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        let metal_frames = Rc::downgrade(self.2.as_ref()?);
-        Some(Rc::new(move || {
-            if let Some(metal_frames) = metal_frames.upgrade() {
-                metal_frames.wake();
+        let waker: Rc<dyn Fn()> = match &self.2 {
+            Frames::Metal(frames) => {
+                let frames = Rc::downgrade(frames);
+                Rc::new(move || {
+                    if let Some(frames) = frames.upgrade() {
+                        frames.wake();
+                    }
+                })
             }
-        }))
+            Frames::Link(frames) => {
+                let frames = Rc::downgrade(frames);
+                Rc::new(move || {
+                    if let Some(frames) = frames.upgrade() {
+                        frames.wake();
+                    }
+                })
+            }
+        };
+        Some(waker)
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -3417,21 +3446,28 @@ extern "C" fn step(view: *mut c_void) {
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
-        let signal = match &lock.frame_source {
-            FrameSource::DisplayLink(Some(frame_source)) => frame_source.take_signal(),
-            _ => None,
+        let link_frames = match &lock.frame_source {
+            FrameSource::DisplayLink(link_frames) => Some(link_frames.clone()),
+            FrameSource::Metal(_) => None,
         };
+        let signal = link_frames.as_ref().and_then(|frames| frames.take_signal());
         let (signal_at, signal_source) = signal.map_or(
             (None, FrameRequestSource::NativeCallback),
             |(at, source)| (Some(at), source),
         );
         drop(lock);
+        if let Some(link_frames) = &link_frames {
+            link_frames.begin_frame();
+        }
         callback(RequestFrameOptions {
             signal_at,
             signal_source,
             ..Default::default()
         });
         window_state.lock().request_frame_callback = Some(callback);
+        if let Some(link_frames) = &link_frames {
+            link_frames.end_frame();
+        }
     }
 }
 

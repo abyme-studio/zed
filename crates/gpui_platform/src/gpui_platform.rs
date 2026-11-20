@@ -101,11 +101,18 @@ pub fn bench_text_system() -> std::sync::Arc<dyn gpui::PlatformTextSystem> {
 #[cfg(any(feature = "bench-support", feature = "test-support"))]
 pub fn current_headless_renderer() -> anyhow::Result<Option<Box<dyn gpui::PlatformHeadlessRenderer>>>
 {
-    #[cfg(target_os = "macos")]
+    // The same renderer as the platform's windows: `gpui_apple`'s under `metal-renderer`.
+    #[cfg(all(target_os = "macos", feature = "metal-renderer"))]
     {
         Ok(Some(Box::new(
             gpui_macos::metal_renderer::MetalHeadlessRenderer::new()?,
         )))
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "metal-renderer")))]
+    {
+        gpui_macos::WgpuHeadlessRenderer::new()
+            .map(|renderer| Some(Box::new(renderer) as Box<dyn gpui::PlatformHeadlessRenderer>))
     }
 
     #[cfg(target_os = "linux")]

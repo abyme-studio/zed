@@ -342,6 +342,94 @@ impl MetalFrames {
     }
 }
 
+/// A window's `CVDisplayLink` frames, paced as [`MetalFrames`] paces the Metal
+/// link: after a request in which GPUI neither drew nor asked for another
+/// frame, the window leaves its display's link, and GPUI's frame waker joins
+/// it again. Without this a window on the `CVDisplayLink` calls GPUI at every
+/// vsync while idle. Shared with the waker, so a wake never takes the
+/// window's lock.
+#[derive(Default)]
+pub struct LinkFrames {
+    source: RefCell<Option<WindowFrameSource>>,
+    /// The display the window's frames follow while started; `None` once stopped.
+    display: Cell<Option<CGDirectDisplayID>>,
+    paused: Cell<bool>,
+    /// Whether GPUI asked for a frame since the current request began.
+    woken: Cell<bool>,
+    /// Whether GPUI drew since the current request began.
+    drew: Cell<bool>,
+}
+
+impl LinkFrames {
+    pub fn start(
+        &self,
+        display_id: CGDirectDisplayID,
+        data: *mut c_void,
+        callback: extern "C" fn(*mut c_void),
+    ) -> Result<()> {
+        let mut source = self.source.borrow_mut();
+        let source = source.get_or_insert_with(|| WindowFrameSource::new(data, callback));
+        self.paused.set(false);
+        self.display.set(Some(display_id));
+        source.start(display_id)
+    }
+
+    pub fn stop(&self) {
+        self.display.set(None);
+        self.paused.set(false);
+        if let Some(source) = self.source.borrow_mut().as_mut() {
+            source.stop();
+        }
+    }
+
+    /// Releases the window's dispatch source, when the window closes.
+    pub fn close(&self) {
+        self.display.set(None);
+        drop(self.source.borrow_mut().take());
+    }
+
+    pub fn take_signal(&self) -> Option<(Instant, FrameRequestSource)> {
+        self.source.borrow().as_ref()?.take_signal()
+    }
+
+    pub fn wake(&self) {
+        self.woken.set(true);
+        if !self.paused.get() {
+            return;
+        }
+        let Some(display_id) = self.display.get() else {
+            return;
+        };
+        // A source being started or stopped is already leaving the pause.
+        if let Ok(mut source) = self.source.try_borrow_mut()
+            && let Some(source) = source.as_mut()
+        {
+            self.paused.set(false);
+            source.start(display_id).log_err();
+        }
+    }
+
+    pub fn drew(&self) {
+        self.drew.set(true);
+    }
+
+    pub fn begin_frame(&self) {
+        self.woken.set(false);
+        self.drew.set(false);
+    }
+
+    /// Ends a request, leaving the display's link if GPUI neither drew nor
+    /// asked for another frame while it ran. Returns whether it paused.
+    pub fn end_frame(&self) -> bool {
+        let pause = !self.drew.get() && !self.woken.get() && self.display.get().is_some();
+        if pause && let Some(source) = self.source.borrow_mut().as_mut() {
+            source.stop();
+            self.paused.set(true);
+        }
+        pause
+    }
+}
+
 /// A per-window source of frame requests, paced by the display the window is
 /// on. The wrapped dispatch source coalesces vsync ticks from the display's
 /// io thread and invokes `callback(data)` on the main queue.
@@ -590,6 +678,45 @@ mod tests {
     use super::*;
     use objc2::AnyThread;
     use objc2_quartz_core::CAMetalDisplayLink;
+
+    extern "C" fn no_frame(_: *mut c_void) {}
+
+    #[test]
+    fn link_frames_leave_the_link_only_when_gpui_neither_draws_nor_asks_again() {
+        let frames = LinkFrames::default();
+        let display = core_graphics::display::CGDisplay::main().id;
+        if frames
+            .start(display, std::ptr::null_mut(), no_frame)
+            .is_err()
+        {
+            return;
+        }
+
+        frames.begin_frame();
+        frames.drew();
+        assert!(!frames.end_frame(), "a frame that drew keeps the link");
+
+        frames.begin_frame();
+        frames.wake();
+        assert!(
+            !frames.end_frame(),
+            "a wake during the request keeps the link"
+        );
+
+        frames.begin_frame();
+        assert!(frames.end_frame(), "an idle request leaves the link");
+        assert!(frames.paused.get());
+
+        frames.wake();
+        assert!(!frames.paused.get(), "a wake joins the link again");
+
+        frames.stop();
+        frames.begin_frame();
+        assert!(!frames.end_frame(), "a stopped window has no link to leave");
+        frames.wake();
+        assert!(!frames.paused.get());
+        frames.close();
+    }
 
     #[test]
     fn metal_frames_pause_only_when_gpui_neither_draws_nor_asks_again() {

@@ -43,7 +43,11 @@ impl WgpuMacRenderer {
         };
         // Safety: the layer is a `CAMetalLayer`, and this struct drops the renderer before it.
         let mut renderer = unsafe {
-            WgpuRenderer::new_from_layer(context, Retained::as_ptr(&layer).cast_mut().cast(), config)?
+            WgpuRenderer::new_from_layer(
+                context,
+                Retained::as_ptr(&layer).cast_mut().cast(),
+                config,
+            )?
         };
         if use_display_p3 {
             renderer.set_color_space(wgpu::SurfaceColorSpace::DisplayP3);

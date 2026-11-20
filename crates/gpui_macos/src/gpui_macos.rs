@@ -21,6 +21,13 @@ mod wgpu_renderer;
 #[cfg(not(feature = "metal-renderer"))]
 use wgpu_renderer as renderer;
 
+/// The headless renderer of the windows' own renderer, for tests and benchmarks.
+#[cfg(all(
+    not(feature = "metal-renderer"),
+    any(feature = "test-support", feature = "bench-support")
+))]
+pub use gpui_wgpu::WgpuHeadlessRenderer;
+
 pub mod metal_renderer {
     pub use gpui_apple::metal_renderer::{PathRasterizationVertex, PathSprite, SurfaceBounds};
 
