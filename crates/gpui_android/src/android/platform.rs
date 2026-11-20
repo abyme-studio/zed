@@ -59,6 +59,18 @@ fn post_frame() {
     }
 }
 
+/// Whether this is the Android emulator. Its Vulkan, passed through to the host (SwiftShader, or
+/// MoltenVK on a Mac), hangs building GPUI's pipelines or cannot compile its shaders.
+fn is_emulator() -> bool {
+    ["ro.boot.qemu", "ro.kernel.qemu"].iter().any(|name| {
+        let name = std::ffi::CString::new(*name).expect("no nul");
+        let mut value = [0 as std::ffi::c_char; 92];
+        // SAFETY: `value` is PROP_VALUE_MAX (92) bytes, as the call requires.
+        let len = unsafe { libc::__system_property_get(name.as_ptr(), value.as_mut_ptr()) };
+        len == 1 && value[0] == b'1' as std::ffi::c_char
+    })
+}
+
 /// The system's light or dark mode.
 pub(crate) fn appearance(app: &AndroidApp) -> WindowAppearance {
     match app.config().ui_mode_night() {
@@ -104,6 +116,11 @@ pub(crate) struct AndroidPlatformState {
 impl AndroidPlatform {
     /// Made on the thread `android_main` runs on, which becomes GPUI's main thread.
     pub fn new(app: AndroidApp) -> Self {
+        if is_emulator() && std::env::var_os("WGPU_BACKEND").is_none() {
+            log::info!("gpui_android: an emulator; drawing with GL, as its Vulkan hangs or fails");
+            // SAFETY: GPUI has not started; no other thread reads the environment yet.
+            unsafe { std::env::set_var("WGPU_BACKEND", "gl") };
+        }
         let waker = app.create_waker();
         let _ = WAKER.set(waker.clone());
         let (dispatcher, main_queue) = dispatcher::AndroidDispatcher::new(waker);
