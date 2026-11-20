@@ -20,9 +20,16 @@ static APP: OnceLock<AndroidApp> = OnceLock::new();
 
 /// Hands GPUI the activity `android_main` was given. Call it first thing in `android_main`, before
 /// `gpui_platform::application()`.
+///
+/// A process holds one GPUI app, bound to the first activity's thread: GameActivity polls each
+/// activity on a thread of its own, and GPUI cannot move. So the app's manifest lists every
+/// `configChanges` (the activity is never made again for a change of configuration), `run` ends the
+/// process when its activity is destroyed, and a second activity in the same process ends it too,
+/// so the system starts the activity again in a fresh one.
 pub fn set_android_app(app: AndroidApp) {
     if APP.set(app).is_err() {
-        log::warn!("gpui_android: set_android_app called twice; the first activity is kept");
+        log::error!("gpui_android: a second activity in one process; ending it for a fresh start");
+        std::process::exit(0);
     }
 }
 
