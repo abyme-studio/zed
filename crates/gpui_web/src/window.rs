@@ -56,6 +56,7 @@ pub(crate) struct WebWindowMutableState {
 
 thread_local! {
     static CANVAS: RefCell<Option<web_sys::HtmlCanvasElement>> = const { RefCell::new(None) };
+    static INPUT: RefCell<Option<web_sys::EventTarget>> = const { RefCell::new(None) };
 }
 
 /// The canvas GPUI draws the page's window in, once it is made: an app places what goes under or
@@ -63,6 +64,12 @@ thread_local! {
 /// through to what is under it.
 pub fn window_canvas() -> Option<web_sys::HtmlCanvasElement> {
     CANVAS.with(|c| c.borrow().clone())
+}
+
+/// Where the window takes its keys, its IME field, once it is made: an app whose own element holds
+/// the page's focus (an accessibility mirror) sends a key on here, as the window would have had it.
+pub fn window_input() -> Option<web_sys::EventTarget> {
+    INPUT.with(|i| i.borrow().clone())
 }
 
 pub(crate) struct WebWindowInner {
@@ -192,6 +199,7 @@ impl WebWindow {
             .flatten()
             .is_some_and(|query| query.matches());
         let ime_mirror = ImeMirror::new(&document, &body, touch_input)?;
+        INPUT.with(|i| *i.borrow_mut() = Some(ime_mirror.event_target().clone()));
         let mut viewport = WebViewport::new(&document)?;
         viewport.update(&browser_window, &canvas)?;
 
