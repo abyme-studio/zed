@@ -746,8 +746,10 @@ impl WgpuContext {
     pub fn uses_webgl_instance_data(&self) -> bool {
         // Also native GLES without unaligned buffer bindings (the Android emulator's), which
         // cannot bind GPUI's instance structs from storage buffers.
-        matches!(self.backend, WgpuBackend::Gl)
-            && (cfg!(target_family = "wasm")
+        matches!(
+            self.backend,
+            WgpuBackend::Gl | WgpuBackend::Native(wgpu::Backend::Gl)
+        ) && (cfg!(target_family = "wasm")
                 || !self
                     .adapter
                     .get_downlevel_capabilities()
