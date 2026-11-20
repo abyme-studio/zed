@@ -155,6 +155,12 @@ impl AndroidPlatformState {
         self.window.borrow().upgrade()
     }
 
+    fn read_insets(&self, window: &AndroidWindowState) {
+        if let Some(insets) = super::insets::read(&self.app, scale_of(&self.app)) {
+            window.set_insets(insets);
+        }
+    }
+
     fn lifecycle(&self, phase: AppLifecyclePhase) {
         self.lifecycle_callback.with(|callback| callback(phase));
     }
@@ -169,6 +175,9 @@ impl AndroidPlatformState {
                 {
                     log::error!("gpui_android: could not draw on the activity's surface: {e:#}");
                 }
+                if let Some(window) = self.window() {
+                    self.read_insets(&window);
+                }
             }
             MainEvent::TerminateWindow { .. } => {
                 if let Some(window) = self.window() {
@@ -178,6 +187,12 @@ impl AndroidPlatformState {
             MainEvent::WindowResized { .. } | MainEvent::ContentRectChanged { .. } => {
                 if let Some(window) = self.window() {
                     window.surface_resized();
+                    self.read_insets(&window);
+                }
+            }
+            MainEvent::InsetsChanged { .. } => {
+                if let Some(window) = self.window() {
+                    self.read_insets(&window);
                 }
             }
             MainEvent::RedrawNeeded { .. } => {
