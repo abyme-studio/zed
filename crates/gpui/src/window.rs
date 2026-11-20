@@ -2057,10 +2057,10 @@ impl Window {
                     measure("present duration", || {
                         handle
                             .update(&mut cx, |_, window, _| window.present())
-                        .with_context(|| {
-                            format!("presenting frame for window {:?}", handle.window_id())
-                        })
-                        .log_err();
+                            .with_context(|| {
+                                format!("presenting frame for window {:?}", handle.window_id())
+                            })
+                            .log_err();
                     })
                 }
 
