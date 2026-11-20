@@ -1,5 +1,6 @@
 //! The `GameActivity`-backed implementation of GPUI's platform on Android.
 
+mod clipboard;
 mod dispatcher;
 mod display;
 mod input;

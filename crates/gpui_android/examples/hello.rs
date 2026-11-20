@@ -11,12 +11,16 @@ gpui::actions!(hello, [Backspace, Delete, Left, Right, Home, End]);
 #[allow(dead_code)]
 mod example_editor;
 
+// Copy and paste the field's whole text through the system clipboard.
+#[cfg(target_os = "android")]
+gpui::actions!(hello, [Copy, Paste]);
+
 #[cfg(target_os = "android")]
 mod app {
     use crate::example_editor::{Editor, standard_actions};
-    use crate::{Backspace, Delete, End, Home, Left, Right};
+    use crate::{Backspace, Copy, Delete, End, Home, Left, Paste, Right};
     use gpui::{
-        App, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render,
+        App, ClipboardItem, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render,
         SharedString, StatefulInteractiveElement, Styled, Window, WindowOptions, div, prelude::*,
         px, rgb,
     };
@@ -46,6 +50,27 @@ mod app {
                         .key_context("TextInput")
                         .track_focus(&focus)
                         .map(standard_actions(self.field.clone()))
+                        .on_action({
+                            let field = self.field.clone();
+                            move |_: &Copy, _, cx| {
+                                let text = field.read(cx).text(cx);
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            }
+                        })
+                        .on_action({
+                            let field = self.field.clone();
+                            move |_: &Paste, _, cx| {
+                                let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+                                    return;
+                                };
+                                field.update(cx, |editor, cx| {
+                                    let at = editor.cursor;
+                                    editor.value.update(cx, |value, _| value.insert_str(at, &text));
+                                    editor.cursor = at + text.len();
+                                    cx.notify();
+                                });
+                            }
+                        })
                         .on_click(move |_, window, cx| window.focus(&focus, cx))
                         .mx_4()
                         .mb_4()
@@ -100,6 +125,8 @@ mod app {
                 KeyBinding::new("right", Right, None),
                 KeyBinding::new("home", Home, None),
                 KeyBinding::new("end", End, None),
+                KeyBinding::new("ctrl-c", Copy, None),
+                KeyBinding::new("ctrl-v", Paste, None),
             ]);
             cx.open_window(WindowOptions::default(), |window, cx| {
                 let field = cx.new(|cx| Editor::new("", window, cx));
