@@ -49,6 +49,20 @@ pub(crate) struct WebWindowMutableState {
     pub(crate) mouse_position: Point<Pixels>,
     pub(crate) modifiers: Modifiers,
     pub(crate) capslock: Capslock,
+    /// The app's background: anything but opaque draws the canvas clear where nothing paints,
+    /// premultiplied, so what the page holds under the canvas shows through.
+    pub(crate) background_appearance: WindowBackgroundAppearance,
+}
+
+thread_local! {
+    static CANVAS: RefCell<Option<web_sys::HtmlCanvasElement>> = const { RefCell::new(None) };
+}
+
+/// The canvas GPUI draws the page's window in, once it is made: an app places what goes under or
+/// over it in the page (a layer of `<iframe>`s, an accessibility mirror), and lets the pointer
+/// through to what is under it.
+pub fn window_canvas() -> Option<web_sys::HtmlCanvasElement> {
+    CANVAS.with(|c| c.borrow().clone())
 }
 
 pub(crate) struct WebWindowInner {
@@ -138,6 +152,7 @@ impl WebWindow {
             .ok_or_else(|| anyhow::anyhow!("No `body` found on document"))?;
         body.append_child(&canvas)
             .map_err(|error| anyhow::anyhow!("Failed to append canvas to body: {error:?}"))?;
+        CANVAS.with(|c| *c.borrow_mut() = Some(canvas.clone()));
         Ok(canvas)
     }
 
@@ -201,6 +216,7 @@ impl WebWindow {
             mouse_position: Point::default(),
             modifiers: Modifiers::default(),
             capslock: Capslock::default(),
+            background_appearance: WindowBackgroundAppearance::Opaque,
         };
 
         let is_mac = is_mac_platform(&browser_window);
@@ -892,7 +908,7 @@ impl PlatformWindow for WebWindow {
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
-        WindowBackgroundAppearance::Opaque
+        self.inner.state.borrow().background_appearance
     }
 
     fn set_title(&mut self, title: &str) {
@@ -902,7 +918,20 @@ impl PlatformWindow for WebWindow {
         }
     }
 
-    fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
+    fn set_background_appearance(&self, background: WindowBackgroundAppearance) {
+        {
+            let mut state = self.inner.state.borrow_mut();
+            if state.background_appearance == background {
+                return;
+            }
+            state.background_appearance = background;
+            // A browser blurs nothing behind a canvas: blurred is transparent here.
+            state
+                .renderer
+                .update_transparency(background != WindowBackgroundAppearance::Opaque);
+        }
+        self.inner.wake_frame_loop();
+    }
 
     fn minimize(&self) {
         log::warn!("WebWindow::minimize is not supported in the browser");
