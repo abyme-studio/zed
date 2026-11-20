@@ -4,7 +4,6 @@ use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
     base::{CFRange, TCFType},
-    number::CFNumber,
     string::CFString,
 };
 use core_graphics::{
@@ -16,10 +15,7 @@ use core_graphics::{
 use core_text::{
     font::CTFont,
     font_collection::CTFontCollectionRef,
-    font_descriptor::{
-        CTFontDescriptor, kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait,
-        kCTFontWidthTrait,
-    },
+    font_descriptor::CTFontDescriptor,
     line::CTLine,
     string_attributes::kCTFontAttributeName,
 };
@@ -161,7 +157,10 @@ impl PlatformTextSystem for AppleTextSystem {
 
             let candidate_properties = candidates
                 .iter()
-                .map(|font_id| lock.fonts[font_id.0].properties())
+                .map(|font_id| {
+                    unsafe { lenient_traits::properties(&lock.fonts[font_id.0].native_font()) }
+                        .unwrap_or_default()
+                })
                 .collect::<SmallVec<[_; 4]>>();
 
             let ix = font_kit::matching::find_best_match(
@@ -252,7 +251,7 @@ fn font_smoothing_allowed_by_user() -> bool {
             return true;
         }
         let value = unsafe { CFType::wrap_under_create_rule(value_ref) };
-        let Some(number) = value.downcast_into::<CFNumber>() else {
+        let Some(number) = value.downcast_into::<core_foundation::number::CFNumber>() else {
             return true;
         };
         // Only an explicit value of `0` means that font smoothing is disabled.
@@ -326,28 +325,10 @@ impl AppleTextSystemState {
                 }
             }
 
-            // We've seen a number of panics in production caused by calling font.properties()
-            // which unwraps a downcast to CFNumber. This is an attempt to avoid the panic,
-            // and to try and identify the incalcitrant font.
-            let traits = font.native_font().all_traits();
-            if unsafe {
-                !(traits
-                    .get(kCTFontSymbolicTrait)
-                    .downcast::<CFNumber>()
-                    .is_some()
-                    && traits
-                        .get(kCTFontWidthTrait)
-                        .downcast::<CFNumber>()
-                        .is_some()
-                    && traits
-                        .get(kCTFontWeightTrait)
-                        .downcast::<CFNumber>()
-                        .is_some()
-                    && traits
-                        .get(kCTFontSlantTrait)
-                        .downcast::<CFNumber>()
-                        .is_some())
-            } {
+            // font-kit's `properties()` unwraps each trait as a `CFNumber` and panics on any
+            // other; iOS stores a zero weight, width or slant as `kCFBooleanFalse`. Only a font
+            // whose traits cannot be read at all is skipped; `lenient_traits` reads the rest.
+            if unsafe { lenient_traits::properties(&font.native_font()).is_none() } {
                 log::error!(
                     "Failed to read traits for font {:?} (PostScript name {:?})",
                     font.full_name(),
@@ -735,6 +716,71 @@ fn fontkit_style(style: FontStyle) -> FontkitStyle {
         FontStyle::Normal => FontkitStyle::Normal,
         FontStyle::Italic => FontkitStyle::Italic,
         FontStyle::Oblique => FontkitStyle::Oblique,
+    }
+}
+
+// A font's traits as font-kit's `properties()` reads them, without its panics: a trait that is a
+// `CFBoolean` (iOS's zero) or missing reads as zero. The weight and width mappings are font-kit's
+// (`loaders/core_text.rs`), which keeps them private.
+mod lenient_traits {
+    use core_foundation::{boolean::CFBoolean, number::CFNumber, string::CFStringRef};
+    use core_text::{
+        font::CTFont,
+        font_descriptor::{
+            CTFontTraits, SymbolicTraitAccessors, kCTFontSlantTrait, kCTFontSymbolicTrait,
+            kCTFontWeightTrait, kCTFontWidthTrait,
+        },
+    };
+    use font_kit::properties::{Properties, Stretch, Style, Weight};
+
+    const WEIGHTS: [f32; 9] = [-0.7, -0.5, -0.23, 0.0, 0.2, 0.3, 0.4, 0.6, 0.8];
+    const STRETCHES: [f32; 9] = [0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.5, 2.0];
+
+    /// The trait's number; a `CFBoolean` as 0 or 1; `None` when it is neither.
+    unsafe fn number(traits: &CTFontTraits, key: CFStringRef) -> Option<f64> {
+        let value = traits.find(key)?;
+        if let Some(n) = value.downcast::<CFNumber>() {
+            return n.to_f64();
+        }
+        value.downcast::<CFBoolean>().map(|b| if bool::from(b) { 1.0 } else { 0.0 })
+    }
+
+    /// `None` when the font has no symbolic traits to read.
+    pub unsafe fn properties(font: &CTFont) -> Option<Properties> {
+        let traits = font.all_traits();
+        let symbolic = unsafe { number(&traits, kCTFontSymbolicTrait) }? as i64 as u32;
+        let weight = unsafe { number(&traits, kCTFontWeightTrait) }.unwrap_or(0.0) as f32;
+        let width = unsafe { number(&traits, kCTFontWidthTrait) }.unwrap_or(0.0) as f32;
+        let slant = unsafe { number(&traits, kCTFontSlantTrait) }.unwrap_or(0.0);
+        let style = if symbolic.is_italic() {
+            Style::Italic
+        } else if slant > 0.0 {
+            Style::Oblique
+        } else {
+            Style::Normal
+        };
+        Some(Properties {
+            style,
+            weight: Weight(find_index(weight, &WEIGHTS) * 100.0 + 100.0),
+            stretch: Stretch(lookup(((width.clamp(-1.0, 1.0) + 1.0) * 4.0).clamp(0.0, 8.0), &STRETCHES)),
+        })
+    }
+
+    fn lookup(index: f32, mapping: &[f32]) -> f32 {
+        let (lower, upper) = (mapping[index.floor() as usize], mapping[index.ceil() as usize]);
+        lower + (upper - lower) * index.fract()
+    }
+
+    fn find_index(value: f32, mapping: &[f32]) -> f32 {
+        let upper = match mapping.binary_search_by(|v| v.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Less)) {
+            Ok(index) => return index as f32,
+            Err(upper) => upper,
+        };
+        if upper == 0 || upper >= mapping.len() {
+            return upper as f32;
+        }
+        let (lo, hi) = (mapping[upper - 1], mapping[upper]);
+        (upper - 1) as f32 + (value - lo) / (hi - lo)
     }
 }
 
