@@ -421,18 +421,6 @@ impl Platform for AndroidPlatform {
         self.0.clipboard.replace(Some(item));
     }
 
-    fn read_from_primary(&self) -> Option<ClipboardItem> {
-        None
-    }
-
-    fn write_to_primary(&self, _item: ClipboardItem) {}
-
-    fn read_from_find_pasteboard(&self) -> Option<ClipboardItem> {
-        None
-    }
-
-    fn write_to_find_pasteboard(&self, _item: ClipboardItem) {}
-
     fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
         Task::ready(Err(anyhow!("gpui_android has no credential store yet")))
     }
