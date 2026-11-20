@@ -26,6 +26,8 @@ harness = false
 
 [features]
 runtime_shaders = ["gpui_apple/runtime_shaders"]
+# Draw windows with gpui_apple's MetalRenderer instead of gpui_wgpu's renderer.
+metal-renderer = []
 
 [dependencies]
 gpui.workspace = true
@@ -40,6 +42,7 @@ anyhow.workspace = true
 block2.workspace = true
 futures.workspace = true
 gpui_apple = { workspace = true, features = ["font-kit"] }
+gpui_wgpu.workspace = true
 log.workspace = true
 objc2.workspace = true
 objc2-foundation = { workspace = true, features = ["NSThread", "NSOperation", "NSUserActivity", "block2"] }

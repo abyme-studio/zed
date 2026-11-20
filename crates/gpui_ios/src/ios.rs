@@ -4,6 +4,7 @@ mod application;
 mod display;
 mod events;
 mod platform;
+mod renderer;
 mod text_input;
 mod window;
 

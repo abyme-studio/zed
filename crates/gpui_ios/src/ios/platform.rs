@@ -56,6 +56,8 @@ pub(crate) struct IosPlatformState {
     display_observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
     display_task: RefCell<Option<Task<()>>>,
     displays_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
+    /// The GPU device every window's renderer shares.
+    pub(super) renderer_context: super::renderer::Context,
 }
 
 impl Default for IosPlatform {
@@ -80,6 +82,7 @@ impl IosPlatform {
             display_observers: RefCell::new(Vec::new()),
             display_task: RefCell::new(None),
             displays_changed_callback: CallbackSlot::default(),
+            renderer_context: Default::default(),
         });
         let (sender, mut receiver) = mpsc::unbounded();
         let block = RcBlock::new(move |_: std::ptr::NonNull<NSNotification>| {

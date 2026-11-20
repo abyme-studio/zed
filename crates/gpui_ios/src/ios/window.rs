@@ -20,10 +20,8 @@ use gpui::{
     TouchEvent, TouchId, TouchPhase, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowInsets, WindowParams, WindowVisibility, px, size,
 };
-use gpui_apple::{
-    main_thread_marker,
-    metal_renderer::{Context as MetalContext, MetalRenderer},
-};
+use super::renderer::{self, Renderer};
+use gpui_apple::main_thread_marker;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ProtocolObject};
 use objc2::{
@@ -289,7 +287,7 @@ pub(crate) struct IosWindowState {
     mouse_position: Cell<Point<Pixels>>,
     /// Current modifiers
     modifiers: Cell<Modifiers>,
-    renderer: Mutex<MetalRenderer>,
+    renderer: Mutex<Renderer>,
 }
 
 impl IosWindow {
@@ -326,12 +324,11 @@ impl IosWindow {
 
         let layer = view.layer();
         layer.setContentsScale(scale);
-        let mut renderer = MetalRenderer::from_layer(
-            MetalContext::default(),
+        let mut renderer = renderer::new_renderer(
+            platform.renderer_context.clone(),
             layer
                 .downcast_ref::<CAMetalLayer>()
                 .ok_or_else(|| anyhow::anyhow!("UIKit view must have a CAMetalLayer"))?,
-            false,
         )?;
         let pixel_w = (screen_bounds_cg.size.width * scale) as i32;
         let pixel_h = (screen_bounds_cg.size.height * scale) as i32;
