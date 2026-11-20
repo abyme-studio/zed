@@ -2052,12 +2052,16 @@ impl Window {
                             .log_err();
                     })
                 } else if needs_present {
-                    handle
-                        .update(&mut cx, |_, window, _| window.present())
+                    // A frame drawn outside a frame request (a key's dispatch draws a dirty window
+                    // first) is presented here: measured too, or it would go uncounted.
+                    measure("present duration", || {
+                        handle
+                            .update(&mut cx, |_, window, _| window.present())
                         .with_context(|| {
                             format!("presenting frame for window {:?}", handle.window_id())
                         })
                         .log_err();
+                    })
                 }
 
                 handle
