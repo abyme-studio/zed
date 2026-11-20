@@ -3,6 +3,7 @@
 mod dispatcher;
 mod display;
 mod input;
+mod insets;
 mod platform;
 mod text_input;
 mod window;
