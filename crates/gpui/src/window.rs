@@ -2099,10 +2099,10 @@ impl Window {
                                 window.advance_scene_animations(cx);
                                 window.present();
                             })
-                        .with_context(|| {
-                            format!("presenting frame for window {:?}", handle.window_id())
-                        })
-                        .log_err();
+                            .with_context(|| {
+                                format!("presenting frame for window {:?}", handle.window_id())
+                            })
+                            .log_err();
                     })
                 }
 
