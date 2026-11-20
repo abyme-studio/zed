@@ -7498,6 +7498,7 @@ dependencies = [
  "ndk-sys",
  "parking_lot",
  "raw-window-handle",
+ "unicode-segmentation",
  "uuid",
 ]
 

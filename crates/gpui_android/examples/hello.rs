@@ -1,16 +1,29 @@
-//! A GPUI window on Android (phone-android-tessera task 2.5): text, a scrolling list, and a button
-//! a screen reader names. Built as `libhello.so`, loaded by the GameActivity in
+//! A GPUI window on Android (phone-android-tessera task 2.5): text, a field typed into with the
+//! soft keyboard, a scrolling list, and a button a screen reader names. Built as `libhello.so`, loaded by the GameActivity in
 //! crates/gpui_android/android (see its README).
+
+// The field is GPUI's example editor, which binds these.
+#[cfg(target_os = "android")]
+gpui::actions!(hello, [Backspace, Delete, Left, Right, Home, End]);
+
+#[cfg(target_os = "android")]
+#[path = "../../gpui/examples/view_example/example_editor.rs"]
+#[allow(dead_code)]
+mod example_editor;
 
 #[cfg(target_os = "android")]
 mod app {
+    use crate::example_editor::{Editor, standard_actions};
+    use crate::{Backspace, Delete, End, Home, Left, Right};
     use gpui::{
-        App, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-        StatefulInteractiveElement, Styled, Window, WindowOptions, div, prelude::*, px, rgb,
+        App, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render,
+        SharedString, StatefulInteractiveElement, Styled, Window, WindowOptions, div, prelude::*,
+        px, rgb,
     };
 
     struct Hello {
         taps: usize,
+        field: Entity<Editor>,
     }
 
     impl Render for Hello {
@@ -25,6 +38,26 @@ mod app {
                 .flex()
                 .flex_col()
                 .child(div().p_4().text_2xl().child("Hello from GPUI on Android"))
+                .child({
+                    let focus = self.field.read(cx).focus_handle.clone();
+                    let focused = focus.is_focused(window);
+                    div()
+                        .id("field")
+                        .key_context("TextInput")
+                        .track_focus(&focus)
+                        .map(standard_actions(self.field.clone()))
+                        .on_click(move |_, window, cx| window.focus(&focus, cx))
+                        .mx_4()
+                        .mb_4()
+                        .h(px(44.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .border_1()
+                        .rounded_md()
+                        .border_color(rgb(if focused { 0x0969da } else { 0xd0d7de }))
+                        .child(self.field.clone())
+                })
                 .child(
                     div()
                         .id("tap")
@@ -60,7 +93,18 @@ mod app {
 
     pub fn run() {
         gpui_platform::application().run(|cx: &mut App| {
-            cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Hello { taps: 0 }))
+            cx.bind_keys([
+                KeyBinding::new("backspace", Backspace, None),
+                KeyBinding::new("delete", Delete, None),
+                KeyBinding::new("left", Left, None),
+                KeyBinding::new("right", Right, None),
+                KeyBinding::new("home", Home, None),
+                KeyBinding::new("end", End, None),
+            ]);
+            cx.open_window(WindowOptions::default(), |window, cx| {
+                let field = cx.new(|cx| Editor::new("", window, cx));
+                cx.new(|_| Hello { taps: 0, field })
+            })
                 .expect("could not open the window");
             cx.activate(true);
         });
