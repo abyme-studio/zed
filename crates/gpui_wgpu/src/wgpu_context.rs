@@ -439,6 +439,15 @@ impl WgpuContext {
             );
         }
 
+        // GPUI's shaders ship precompiled as a metallib on macOS (`build.rs`).
+        #[cfg(target_os = "macos")]
+        if adapter
+            .features()
+            .contains(wgpu::Features::PASSTHROUGH_SHADERS)
+        {
+            required_features |= wgpu::Features::PASSTHROUGH_SHADERS;
+        }
+
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
         #[cfg(target_family = "wasm")]
         let required_limits = if adapter.get_info().backend == wgpu::Backend::Gl {

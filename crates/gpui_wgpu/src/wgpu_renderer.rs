@@ -44,6 +44,74 @@ const SUBPIXEL_SHADERS: &str = concat!(
     include_str!("shaders_subpixel.wgsl"),
 );
 
+/// GPUI's shaders compiled to a metallib at build time (`build.rs`), so a window's first frame
+/// does not wait on Metal compiling naga's MSL.
+#[cfg(target_os = "macos")]
+const PRECOMPILED_SHADERS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gpui_shaders.metallib"));
+#[cfg(target_os = "macos")]
+const PRECOMPILED_SUBPIXEL_SHADERS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/gpui_subpixel_shaders.metallib"));
+#[cfg(not(target_os = "macos"))]
+const PRECOMPILED_SHADERS: &[u8] = &[];
+#[cfg(not(target_os = "macos"))]
+const PRECOMPILED_SUBPIXEL_SHADERS: &[u8] = &[];
+
+/// Every entry point in the shaders, which a passthrough module must list.
+const SHADER_ENTRY_POINTS: &[&str] = &[
+    "vs_quad",
+    "fs_quad",
+    "vs_shadow",
+    "fs_shadow",
+    "vs_path_rasterization",
+    "fs_path_rasterization",
+    "vs_path",
+    "fs_path",
+    "vs_underline",
+    "fs_underline",
+    "vs_mono_sprite",
+    "fs_mono_sprite",
+    "vs_poly_sprite",
+    "fs_poly_sprite",
+    "vs_surface",
+    "fs_surface",
+    "vs_subpixel_sprite",
+    "fs_subpixel_sprite",
+];
+
+/// Whether this device draws from the metallib: macOS on Metal, unless `GPUI_WGSL_SHADERS` is
+/// set, which compiles the WGSL at runtime as other hosts do.
+fn precompiled_shaders_enabled(device: &wgpu::Device) -> bool {
+    cfg!(target_os = "macos")
+        && device
+            .features()
+            .contains(wgpu::Features::PASSTHROUGH_SHADERS)
+        && std::env::var_os("GPUI_WGSL_SHADERS").is_none()
+}
+
+fn precompiled_shader_module(
+    device: &wgpu::Device,
+    label: &str,
+    metallib: &'static [u8],
+) -> wgpu::ShaderModule {
+    let entry_points: Vec<_> = SHADER_ENTRY_POINTS
+        .iter()
+        .map(|name| wgpu::PassthroughShaderEntryPoint {
+            name: (*name).into(),
+            workgroup_size: (0, 0, 0),
+        })
+        .collect();
+    // Safety: `build.rs` wrote the metallib from these shaders with the resource slots wgpu's
+    // Metal backend gives `create_pipelines`' layouts; `metallib_draws_as_the_wgsl_does` checks it.
+    unsafe {
+        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+            label: Some(label),
+            entry_points: entry_points.into(),
+            metallib: Some(metallib.into()),
+            ..Default::default()
+        })
+    }
+}
+
 fn least_common_multiple(left: u64, right: u64) -> u64 {
     let mut first = left;
     let mut second = right;
@@ -735,6 +803,7 @@ impl WgpuRendererCore {
         path_sample_count: u32,
         dual_source_blending: bool,
         uses_webgl_instance_data: bool,
+        precompiled: bool,
     ) -> WgpuPipelines {
         // Diagnostic guard: verify the device actually has
         // DUAL_SOURCE_BLENDING. We have a crash report (ZED-5G1) where a
@@ -764,18 +833,29 @@ impl WgpuRendererCore {
         } else {
             STORAGE_BUFFER_SHADERS
         };
-        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gpui_shaders"),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-        });
+        let precompiled = precompiled && !uses_webgl_instance_data;
+        let shader_module = if precompiled {
+            precompiled_shader_module(device, "gpui_shaders", PRECOMPILED_SHADERS)
+        } else {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("gpui_shaders"),
+                source: wgpu::ShaderSource::Wgsl(shader_source.into()),
+            })
+        };
 
-        let subpixel_shader_module = if dual_source_blending {
+        let subpixel_shader_module = if !dual_source_blending {
+            None
+        } else if precompiled {
+            Some(precompiled_shader_module(
+                device,
+                "gpui_subpixel_shaders",
+                PRECOMPILED_SUBPIXEL_SHADERS,
+            ))
+        } else {
             Some(device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("gpui_subpixel_shaders"),
                 source: wgpu::ShaderSource::Wgsl(SUBPIXEL_SHADERS.into()),
             }))
-        } else {
-            None
         };
 
         let blend_mode = match alpha_mode {
@@ -1168,6 +1248,7 @@ impl WgpuRenderer {
             core.rendering_params.path_sample_count,
             core.dual_source_blending,
             core.uses_webgl_instance_data,
+            precompiled_shaders_enabled(&resources.device),
         );
 
         if let RendererState::Ready { surface, core } = &self.state {
@@ -1321,6 +1402,7 @@ impl WgpuRendererCore {
             rendering_params.path_sample_count,
             dual_source_blending,
             uses_webgl_instance_data,
+            precompiled_shaders_enabled(&device),
         );
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas_sampler"),
@@ -2432,6 +2514,22 @@ impl WgpuHeadlessRenderer {
         })
     }
 
+    /// Rebuilds the pipelines from the metallib (`precompiled`) or the WGSL, to compare them.
+    #[cfg(test)]
+    fn use_shaders(&mut self, precompiled: bool) {
+        let core = &mut self.core;
+        core.resources.pipelines = WgpuRendererCore::create_pipelines(
+            &core.resources.device,
+            &core.resources.bind_group_layouts,
+            core.target_format,
+            wgpu::CompositeAlphaMode::Opaque,
+            core.rendering_params.path_sample_count,
+            core.dual_source_blending,
+            core.uses_webgl_instance_data,
+            precompiled,
+        );
+    }
+
     fn ensure_render_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,
@@ -3013,6 +3111,176 @@ mod tests {
         // Rejection must leave the renderer usable.
         let image = renderer.render_scene_to_image(&Scene::default(), device_size(4, 4))?;
         assert_eq!(image.dimensions(), (4, 4));
+        Ok(())
+    }
+
+    /// The metallib `build.rs` writes must draw what wgpu's runtime WGSL path draws: its resource
+    /// slots are `build.rs`'s copy of wgpu's, and a slot off draws garbage or nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metallib_draws_as_the_wgsl_does() -> anyhow::Result<()> {
+        use gpui::{
+            AtlasKey, ContentMask, DevicePixels, PlatformAtlas as _, PlatformHeadlessRenderer as _,
+            Point, RenderGlyphParams, RenderImageParams, Scene, TransformationMatrix, point, px,
+        };
+        use std::borrow::Cow;
+
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        assert!(
+            precompiled_shaders_enabled(&renderer.core.resources.device),
+            "macOS draws from the metallib"
+        );
+        let size = Size {
+            width: DevicePixels(160),
+            height: DevicePixels(96),
+        };
+        let full = Bounds {
+            origin: Point::default(),
+            size: Size {
+                width: ScaledPixels(160.),
+                height: ScaledPixels(96.),
+            },
+        };
+        let mask = ContentMask { bounds: full };
+        let bounds = |x: f32, y: f32, w: f32, h: f32| Bounds {
+            origin: point(ScaledPixels(x), ScaledPixels(y)),
+            size: Size {
+                width: ScaledPixels(w),
+                height: ScaledPixels(h),
+            },
+        };
+        let atlas = renderer.core.atlas.clone();
+        let tile = |key: AtlasKey, bytes_per_pixel: usize| {
+            let (w, h) = (8, 8);
+            let bytes: Vec<u8> = (0..w * h * bytes_per_pixel)
+                .map(|i| (i * 37 % 251) as u8)
+                .collect();
+            atlas
+                .get_or_insert_with(key, &mut || {
+                    Ok(Some((
+                        Size {
+                            width: DevicePixels(w as i32),
+                            height: DevicePixels(h as i32),
+                        },
+                        Cow::Owned(bytes.clone()),
+                    )))
+                })
+                .unwrap()
+                .unwrap()
+        };
+        let glyph = |subpixel_rendering| {
+            AtlasKey::Glyph(RenderGlyphParams {
+                font_id: gpui::FontId(0),
+                glyph_id: gpui::GlyphId(subpixel_rendering as u32),
+                font_size: px(12.),
+                subpixel_variant: Default::default(),
+                scale_factor: 1.,
+                is_emoji: false,
+                subpixel_rendering,
+                dilation: 0,
+            })
+        };
+        let mono = tile(glyph(false), 1);
+        let subpixel = tile(glyph(true), 4);
+        let image = tile(
+            AtlasKey::Image(RenderImageParams {
+                image_id: gpui::ImageId(0),
+                frame_index: 0,
+            }),
+            4,
+        );
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(Quad {
+            order: 0,
+            border_style: BorderStyle::Dashed,
+            bounds: bounds(4., 4., 48., 32.),
+            content_mask: mask.clone(),
+            background: linear_gradient(
+                45.,
+                linear_color_stop(gpui::red(), 0.),
+                linear_color_stop(gpui::blue(), 1.),
+            ),
+            border_color: gpui::green(),
+            corner_radii: Corners::all(ScaledPixels(6.)),
+            border_widths: Edges::all(ScaledPixels(2.)),
+        });
+        scene.insert_primitive(Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(4.),
+            bounds: bounds(60., 4., 30., 20.),
+            corner_radii: Corners::all(ScaledPixels(3.)),
+            content_mask: mask.clone(),
+            color: gpui::black(),
+            element_bounds: bounds(60., 4., 30., 20.),
+            element_corner_radii: Corners::all(ScaledPixels(3.)),
+            inset: 0,
+            pad: 0,
+        });
+        scene.insert_primitive(Underline {
+            order: 0,
+            pad: 0,
+            bounds: bounds(100., 10., 50., 6.),
+            content_mask: mask.clone(),
+            color: gpui::white(),
+            thickness: ScaledPixels(1.5),
+            wavy: true.into(),
+        });
+        let mut path = gpui::Path::new(point(px(10.), px(50.)));
+        path.line_to(point(px(40.), px(60.)));
+        path.line_to(point(px(20.), px(90.)));
+        path.color = gpui::yellow().into();
+        path.content_mask = ContentMask {
+            bounds: Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: px(160.),
+                    height: px(96.),
+                },
+            },
+        };
+        scene.insert_primitive(path.scale(1.));
+        scene.insert_primitive(MonochromeSprite {
+            order: 0,
+            pad: 0,
+            tile: mono,
+            bounds: bounds(50., 50., 16., 16.),
+            content_mask: mask.clone(),
+            color: gpui::green(),
+            transformation: TransformationMatrix::unit(),
+        });
+        scene.insert_primitive(SubpixelSprite {
+            order: 0,
+            pad: 0,
+            tile: subpixel,
+            bounds: bounds(80., 50., 16., 16.),
+            content_mask: mask.clone(),
+            color: gpui::white(),
+            transformation: TransformationMatrix::unit(),
+        });
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            tile: image,
+            grayscale: false.into(),
+            opacity: 0.8,
+            bounds: bounds(110., 50., 24., 24.),
+            content_mask: mask.clone(),
+            corner_radii: Corners::all(ScaledPixels(4.)),
+        });
+        scene.finish();
+
+        let precompiled = renderer.render_scene_to_image(&scene, size)?;
+        renderer.use_shaders(false);
+        let wgsl = renderer.render_scene_to_image(&scene, size)?;
+        let drawn = wgsl.pixels().filter(|pixel| pixel.0 != [0, 0, 0, 255]).count();
+        assert!(drawn > 2000, "the scene draws: {drawn} pixels");
+        let differing = precompiled
+            .pixels()
+            .zip(wgsl.pixels())
+            .filter(|(a, b)| a.0.iter().zip(b.0).any(|(a, b)| a.abs_diff(b) > 2))
+            .count();
+        assert_eq!(differing, 0, "pixels where the metallib and the WGSL differ");
         Ok(())
     }
 
