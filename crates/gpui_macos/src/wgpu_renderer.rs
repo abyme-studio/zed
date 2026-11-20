@@ -104,3 +104,36 @@ impl WgpuMacRenderer {
         self.renderer.render_to_image(scene)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Bounds, ContentMask, DevicePixels, Hsla, Quad, ScaledPixels, point, size};
+
+    #[test]
+    fn draws_a_scene_into_an_image_of_the_drawable_size() {
+        let mut renderer = new_renderer(Default::default(), false, false).unwrap();
+        assert!(renderer.layer().is_none(), "wgpu takes its own drawables");
+        renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(32)));
+        let mut scene = Scene::default();
+        let bounds = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(64.), ScaledPixels(32.)),
+        );
+        scene.insert_primitive(Quad {
+            bounds,
+            content_mask: ContentMask { bounds },
+            background: Hsla::red().into(),
+            border_color: Hsla::red(),
+            ..Default::default()
+        });
+        scene.finish();
+        let image = renderer.render_to_image(&scene).unwrap();
+        assert_eq!((image.width(), image.height()), (64, 32));
+        let pixel = image.get_pixel(32, 16);
+        assert!(
+            pixel[0] > 200 && pixel[1] < 50 && pixel[2] < 50,
+            "a red quad fills the frame: {pixel:?}"
+        );
+    }
+}

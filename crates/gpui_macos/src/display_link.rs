@@ -619,6 +619,8 @@ mod tests {
         assert!(frames.end_frame(false), "an idle update pauses the link");
     }
 
+    // Only `MetalRenderer` hands its layer to a `CAMetalDisplayLink`.
+    #[cfg(feature = "metal-renderer")]
     #[test]
     fn a_renderer_draws_normally_after_its_display_link_is_invalidated() {
         if !MetalFrameSource::is_available() {
