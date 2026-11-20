@@ -23,9 +23,8 @@ bench = false
 gpui.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
-# 0.7 is the last on accesskit 0.24, gpui's.
 accesskit.workspace = true
-accesskit_android = { version = "0.7.5", features = ["embedded-dex"] }
+accesskit_android.workspace = true
 android-activity = { version = "0.6.1", features = ["game-activity"] }
 anyhow.workspace = true
 futures.workspace = true
