@@ -2853,6 +2853,23 @@ impl WgpuRenderer {
         };
         let drawable: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDrawable> =
             objc2::runtime::ProtocolObject::from_ref(drawable);
+        // `GPUI_PRESENTED=1` prints whether each frame reached the screen: Metal gives a
+        // presented time of 0 to a drawable the compositor never showed, as for a window it
+        // does not composite.
+        static PRESENTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *PRESENTED.get_or_init(|| std::env::var("GPUI_PRESENTED").is_ok_and(|v| v == "1")) {
+            let handler = block2::RcBlock::new(
+                |drawable: std::ptr::NonNull<
+                    objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDrawable>,
+                >| {
+                    // Safety: Metal passes the drawable, alive for the call.
+                    let presented = unsafe { drawable.as_ref() }.presentedTime();
+                    eprintln!("drawable presented {presented:.6}");
+                },
+            );
+            // Safety: the handler holds nothing and runs on any thread.
+            unsafe { drawable.addPresentedHandler(block2::RcBlock::as_ptr(&handler)) };
+        }
         if presents_with_transaction {
             command_buffer.commit();
             command_buffer.waitUntilScheduled();

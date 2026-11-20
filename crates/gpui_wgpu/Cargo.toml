@@ -48,8 +48,9 @@ wgpu = { workspace = true, features = ["std", "metal", "gles", "vulkan", "wgsl",
 wgpu = { workspace = true, default-features = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
+block2.workspace = true
 objc2.workspace = true
-objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLAllocation", "MTLCommandBuffer", "MTLCommandQueue", "MTLDrawable", "MTLResource", "MTLTexture"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "MTLAllocation", "MTLCommandBuffer", "MTLCommandQueue", "MTLDrawable", "MTLResource", "MTLTexture"] }
 objc2-quartz-core.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
