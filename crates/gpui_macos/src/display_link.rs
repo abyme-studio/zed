@@ -769,15 +769,13 @@ mod tests {
         assert!(frames.end_frame(false), "an idle update pauses the link");
     }
 
-    // Only `MetalRenderer` hands its layer to a `CAMetalDisplayLink`.
-    #[cfg(feature = "metal-renderer")]
     #[test]
     fn a_renderer_draws_normally_after_its_display_link_is_invalidated() {
         if !MetalFrameSource::is_available() {
             return;
         }
         let mut renderer =
-            crate::renderer::MetalRenderer::new(Default::default(), false, false).unwrap();
+            crate::renderer::new_renderer(Default::default(), false, false).unwrap();
         renderer.update_drawable_size(gpui::size(gpui::DevicePixels(64), gpui::DevicePixels(64)));
         let layer = renderer.layer().expect("window renderer has a layer");
         // The link is never added to a run loop: attaching it to the layer is

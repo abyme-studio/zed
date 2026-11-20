@@ -47,6 +47,11 @@ wgpu = { workspace = true, features = ["std", "metal", "gles", "vulkan", "wgsl",
 [target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies]
 wgpu = { workspace = true, default-features = true }
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2.workspace = true
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLAllocation", "MTLCommandBuffer", "MTLCommandQueue", "MTLDrawable", "MTLResource", "MTLTexture"] }
+objc2-quartz-core.workspace = true
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
 wgpu = { workspace = true, features = ["webgl"] }

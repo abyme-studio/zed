@@ -2653,6 +2653,120 @@ impl WgpuRendererCore {
     }
 }
 
+#[cfg(target_vendor = "apple")]
+impl WgpuRenderer {
+    /// Draws `scene` into `drawable`, one a `CAMetalDisplayLink` handed out, and presents it,
+    /// rather than asking the surface's layer for one: `nextDrawable` waits for the compositor
+    /// to release a drawable, and the link's never does. The drawable must come from the layer
+    /// this renderer's surface was made on, so its format is the surface's.
+    ///
+    /// With `presents_with_transaction`, the frame reaches the screen in the current Core
+    /// Animation transaction, as a live resize needs: the work is committed, waited on until
+    /// scheduled, and the drawable presented from here.
+    pub fn draw_to_drawable(
+        &mut self,
+        scene: &Scene,
+        drawable: &objc2::runtime::ProtocolObject<dyn objc2_quartz_core::CAMetalDrawable>,
+        presents_with_transaction: bool,
+    ) -> bool {
+        use objc2_metal::{MTLCommandBuffer as _, MTLCommandQueue as _, MTLDrawable as _};
+        use objc2_quartz_core::CAMetalDrawable as _;
+        use objc2_metal::MTLTexture as _;
+
+        let format = self.surface_config.format;
+        let premultiplied_alpha =
+            self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        let RendererState::Ready { core, .. } = &mut self.state else {
+            return false;
+        };
+        let raw_texture = drawable.texture();
+        // A link's drawable was sized when it was handed out, which can be before a resize
+        // the layer has since taken: the drawable is the authority on the frame's size.
+        let (width, height) = (raw_texture.width() as u32, raw_texture.height() as u32);
+        let size = Size {
+            width: DevicePixels(width as i32),
+            height: DevicePixels(height as i32),
+        };
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        // Safety: the texture is a 2D render target of `format`, one layer and one mip, alive
+        // while the drawable is, which outlives this frame's submission.
+        let texture = unsafe {
+            let hal_texture = wgpu::hal::metal::Device::texture_from_raw(
+                raw_texture,
+                format,
+                objc2_metal::MTLTextureType::Type2D,
+                1,
+                1,
+                wgpu::hal::CopyExtent {
+                    width,
+                    height,
+                    depth: 1,
+                },
+                None,
+            );
+            core.resources
+                .device
+                .create_texture_from_hal::<wgpu::hal::api::Metal>(
+                    hal_texture,
+                    &wgpu::TextureDescriptor {
+                        label: Some("display_link_drawable"),
+                        size: extent,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    },
+                    wgpu::TextureUses::UNINITIALIZED,
+                    false,
+                )
+        };
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        if let Err(error) = core.render_frame(
+            scene,
+            &view,
+            size,
+            premultiplied_alpha,
+            wgpu::Color::TRANSPARENT,
+        ) {
+            log::error!("{error:#}");
+            return false;
+        }
+
+        // wgpu committed the frame's work to this queue; a command buffer committed after it
+        // runs after it, so presenting from one shows the finished frame.
+        // Safety: the queue is Metal's, as this renderer's instance is Metal only on Apple.
+        let Some(hal_queue) = (unsafe {
+            core.resources
+                .queue
+                .as_hal::<wgpu::hal::api::Metal>()
+        }) else {
+            log::error!("the renderer's queue is not Metal's; the frame was not presented");
+            return false;
+        };
+        let Some(command_buffer) = hal_queue.as_raw().commandBuffer() else {
+            log::error!("Metal gave no command buffer to present the frame with");
+            return false;
+        };
+        let drawable: &objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDrawable> =
+            objc2::runtime::ProtocolObject::from_ref(drawable);
+        if presents_with_transaction {
+            command_buffer.commit();
+            command_buffer.waitUntilScheduled();
+            drawable.present();
+        } else {
+            command_buffer.presentDrawable(drawable);
+            command_buffer.commit();
+        }
+        true
+    }
+}
+
 #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
 impl WgpuRenderer {
     /// Draws `scene` into a texture of its own at the surface's size and reads it back,
