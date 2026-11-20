@@ -41,6 +41,10 @@ $S shell input text "hello%sandroid"; sleep 2
 $S exec-out screencap -p >"$OUT/2-typed.png"
 $S shell dumpsys input_method | grep -E "mInputShown|mShowRequested" | head -3 | tee "$OUT/ime.txt"
 $S shell input keyevent KEYCODE_DEL; sleep 1
+# Copy the field's text to the system clipboard and paste it back: "hello androihello androi".
+$S shell input keycombination KEYCODE_CTRL_LEFT KEYCODE_C; sleep 1
+$S shell input keycombination KEYCODE_CTRL_LEFT KEYCODE_V; sleep 2
+$S exec-out screencap -p >"$OUT/2-pasted.png"
 $S shell input tap $((w / 4)) $((h * 22 / 100)); sleep 1
 $S shell input tap $((w / 4)) $((h * 22 / 100)); sleep 2
 $S exec-out screencap -p >"$OUT/3-tapped.png"

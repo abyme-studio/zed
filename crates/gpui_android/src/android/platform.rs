@@ -104,7 +104,7 @@ pub(crate) struct AndroidPlatformState {
     destroyed: Cell<bool>,
     input_available: Cell<bool>,
     appearance: Cell<WindowAppearance>,
-    /// GPUI's clipboard until the system's is reached over JNI.
+    /// The item GPUI last wrote, kept for its metadata: the system clipboard holds text alone.
     clipboard: RefCell<Option<ClipboardItem>>,
     quit_callback: CallbackSlot<Box<dyn FnMut() -> bool>>,
     open_urls_callback: CallbackSlot<Box<dyn FnMut(Vec<String>)>>,
@@ -448,10 +448,13 @@ impl Platform for AndroidPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        self.0.clipboard.borrow().clone()
+        super::clipboard::item(&self.0.app, self.0.clipboard.borrow().as_ref())
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
+        if let Some(text) = item.text() {
+            super::clipboard::write(&self.0.app, &text);
+        }
         self.0.clipboard.replace(Some(item));
     }
 
