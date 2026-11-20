@@ -899,6 +899,34 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
   return ycbcrToRGBTransform * ycbcr;
 }
 
+// 4:2:0 in video range, as VideoToolbox decodes by default: luma in [16, 235] and chroma in
+// [16, 240] of 255, with BT.709's matrix, which abyme's streams are tagged with.
+fragment float4 video_surface_fragment(SurfaceFragmentInput input [[stage_in]],
+                                       texture2d<float> y_texture
+                                       [[texture(SurfaceInputIndex_YTexture)]],
+                                       texture2d<float> cb_cr_texture
+                                       [[texture(SurfaceInputIndex_CbCrTexture)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  float y = (y_texture.sample(texture_sampler, input.texture_position).r -
+             16.0 / 255.0) *
+            (255.0 / 219.0);
+  float2 cb_cr = (cb_cr_texture.sample(texture_sampler, input.texture_position).rg -
+                  128.0 / 255.0) *
+                 (255.0 / 224.0);
+  float r = y + 1.5748 * cb_cr.y;
+  float g = y - 0.1873 * cb_cr.x - 0.4681 * cb_cr.y;
+  float b = y + 1.8556 * cb_cr.x;
+  return float4(saturate(float3(r, g, b)), 1.0);
+}
+
+// One plane of `32BGRA`, sampled as it is: a remote surface's IOSurface.
+fragment float4 bgra_surface_fragment(SurfaceFragmentInput input [[stage_in]],
+                                      texture2d<float> bgra_texture
+                                      [[texture(SurfaceInputIndex_YTexture)]]) {
+  constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
+  return bgra_texture.sample(texture_sampler, input.texture_position);
+}
+
 float4 hsla_to_rgba(Hsla hsla) {
   float h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
   float s = hsla.s;
