@@ -261,6 +261,8 @@ impl Platform for AndroidPlatform {
         }
         // Whatever GPUI queued as it closed.
         dispatcher::drain(&mut state.main_queue.borrow_mut());
+        // GPUI cannot start again on the next activity's thread (see `set_android_app`).
+        std::process::exit(0);
     }
 
     fn quit(&self) {

@@ -16,17 +16,23 @@ while tart list 2>/dev/null | grep -q ' running$' || pgrep -f qemu-system >/dev/
   echo "try: waiting for the VM slot: a tart VM or an emulator runs"
   sleep 30
 done
-"$SDK/emulator/emulator" -avd "${AVD:-gpui-android-34}" -port 5592 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect </dev/null >"$OUT/emulator.log" 2>&1 &
+"$SDK/emulator/emulator" -avd "${AVD:-gpui-android-34}" -port 5592 -no-window -no-audio -no-boot-anim -no-snapshot -gpu ${GPU:-host} </dev/null >"$OUT/emulator.log" 2>&1 &
 emu=$!
 trap 'kill $emu 2>/dev/null || true' EXIT
 S="adb -s emulator-5592"
 $S wait-for-device
 until [ "$($S shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do sleep 2; done
+# Root, for debuggerd; and setup marked done, so no setup wizard or first-run app covers ours.
+$S root >/dev/null; sleep 3; $S wait-for-device
+$S shell settings put secure user_setup_complete 1
+$S shell settings put global device_provisioned 1
 $S install -r "$APK" >/dev/null
 $S logcat -c
 $S shell am start -W -n "$PKG/.MainActivity" | tee "$OUT/start.txt"
 sleep 5
 $S exec-out screencap -p >"$OUT/1-start.png"
+# Every thread's stack, Java and native, to see where a stall is.
+$S shell debuggerd -b "$($S shell pidof "$PKG" | tr -d '\r')" >"$OUT/stacks.txt" 2>&1 || true
 size=$($S shell wm size | sed 's/.*: //' | tr -d '\r'); w=${size%x*}; h=${size#*x}
 d=$($S shell wm density | sed 's/.*: //' | tr -d '\r')
 dp() { echo $(( $1 * d / 160 )); }
