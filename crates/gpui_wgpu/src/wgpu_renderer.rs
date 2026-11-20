@@ -426,7 +426,16 @@ impl WgpuRenderer {
         wgpu::CompositeAlphaMode,
         wgpu::CompositeAlphaMode,
     )> {
-        let surface_caps = surface.get_capabilities(adapter);
+        #[allow(unused_mut)]
+        let mut surface_caps = surface.get_capabilities(adapter);
+        // wgpu's WebGPU backend reports only Opaque, though a canvas takes "premultiplied" too
+        // (its configure maps it): offered here, so a transparent window draws clear in a browser.
+        #[cfg(target_family = "wasm")]
+        if adapter.get_info().backend == wgpu::Backend::BrowserWebGpu
+            && !surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            surface_caps.alpha_modes.push(wgpu::CompositeAlphaMode::PreMultiplied);
+        }
         let preferred_formats = [
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureFormat::Rgba8Unorm,
