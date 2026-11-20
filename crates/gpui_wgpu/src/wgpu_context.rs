@@ -484,6 +484,10 @@ impl WgpuContext {
         } else {
             wgpu::Backends::VULKAN | wgpu::Backends::GL
         };
+        // gpui_android sets WGPU_BACKEND to gl on an emulator, whose Vulkan cannot build our
+        // pipelines.
+        #[cfg(target_os = "android")]
+        let backends = backends.with_env();
         wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
             flags: wgpu::InstanceFlags::default(),
@@ -733,7 +737,15 @@ impl WgpuContext {
     }
 
     pub fn uses_webgl_instance_data(&self) -> bool {
-        matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
+        // Also native GLES without unaligned buffer bindings (the Android emulator's), which
+        // cannot bind GPUI's instance structs from storage buffers.
+        matches!(self.backend, WgpuBackend::Gl)
+            && (cfg!(target_family = "wasm")
+                || !self
+                    .adapter
+                    .get_downlevel_capabilities()
+                    .flags
+                    .contains(wgpu::DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED))
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {
