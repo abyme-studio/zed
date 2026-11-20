@@ -225,6 +225,8 @@ struct WgpuRendererCore {
     adapter_info: wgpu::AdapterInfo,
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
+    /// The backdrop blur's passes, made at the first frame with a blur.
+    backdrop: Option<crate::wgpu_blur::Backdrop>,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -469,8 +471,11 @@ impl WgpuRenderer {
             );
         }
 
+        // A backdrop blur copies out of the frame: asked for where the surface allows it.
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (surface_caps.usages & wgpu::TextureUsages::COPY_SRC);
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: clamped_width.max(1),
@@ -1231,6 +1236,7 @@ impl WgpuRenderer {
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
         if let Err(error) = core.render_frame(
             scene,
+            &frame.texture,
             &frame_view,
             size,
             premultiplied_alpha,
@@ -1400,6 +1406,7 @@ impl WgpuRendererCore {
             adapter_info: context.adapter.get_info(),
             target_format,
             max_texture_size,
+            backdrop: None,
         }
     }
 
@@ -1450,6 +1457,7 @@ impl WgpuRendererCore {
     fn render_frame(
         &mut self,
         scene: &Scene,
+        target: &wgpu::Texture,
         target_view: &wgpu::TextureView,
         size: Size<DevicePixels>,
         premultiplied_alpha: bool,
@@ -1501,7 +1509,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, clear_color)
+        self.record_frame(scene, target, target_view, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1511,9 +1519,26 @@ impl WgpuRendererCore {
     fn record_frame(
         &mut self,
         scene: &Scene,
+        target: &wgpu::Texture,
         frame_view: &wgpu::TextureView,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        // Blurs copy out of the target: none where it cannot be copied from.
+        let blurs = !scene.backdrop_blurs.is_empty()
+            && target.usage().contains(wgpu::TextureUsages::COPY_SRC);
+        if blurs {
+            let device = &self.resources.device;
+            let backdrop = self
+                .backdrop
+                .get_or_insert_with(|| crate::wgpu_blur::Backdrop::new(device, target.format()));
+            backdrop.begin(
+                device,
+                target.format(),
+                scene.backdrop_blurs.len(),
+                target.width(),
+                target.height(),
+            );
+        }
         let mut instance_offset = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
@@ -1645,6 +1670,35 @@ impl WgpuRendererCore {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::BackdropBlurs(range) => {
+                        let Some(backdrop) = self.backdrop.as_mut().filter(|_| blurs) else {
+                            continue;
+                        };
+                        drop(pass);
+                        for blur in &scene.backdrop_blurs[range] {
+                            backdrop.run(
+                                &self.resources.queue,
+                                &mut encoder,
+                                target,
+                                frame_view,
+                                blur,
+                            );
+                        }
+                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("main_pass_continued"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: frame_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: None,
+                            ..Default::default()
+                        });
+                    }
                 }
             }
         }
@@ -2438,14 +2492,13 @@ impl WgpuHeadlessRenderer {
     fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
         self.check_gpu_errors()?;
         self.ensure_render_target(size)?;
-        let view = self
+        let target = self
             .render_target
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
-            .view
-            .clone();
+            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
+        let (texture, view) = (target.texture.clone(), target.view.clone());
         self.core
-            .render_frame(scene, &view, size, false, wgpu::Color::BLACK)?;
+            .render_frame(scene, &texture, &view, size, false, wgpu::Color::BLACK)?;
         Ok(())
     }
 

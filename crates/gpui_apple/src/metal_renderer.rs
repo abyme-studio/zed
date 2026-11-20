@@ -1,4 +1,5 @@
 use crate::metal_atlas::MetalAtlas;
+use crate::metal_blur::Backdrop;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
@@ -149,6 +150,8 @@ pub struct MetalRenderer {
     video_surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// One plane of `32BGRA` (a remote surface's IOSurface), sampled as it is.
     bgra_surfaces_pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// The backdrop blur's passes and textures.
+    backdrop: Backdrop,
     unit_vertices: Retained<ProtocolObject<dyn MTLBuffer>>,
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
@@ -416,6 +419,8 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         )?;
 
+        let backdrop = Backdrop::new(&device, &library, MTLPixelFormat::BGRA8Unorm)?;
+
         let command_queue = device.newCommandQueue().context("creating command queue")?;
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         #[expect(
@@ -455,6 +460,7 @@ impl MetalRenderer {
             surfaces_pipeline_state,
             video_surfaces_pipeline_state,
             bgra_surfaces_pipeline_state,
+            backdrop,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -961,6 +967,24 @@ impl MetalRenderer {
                         command_encoder.endEncoding();
                         return Err(error);
                     }
+                }
+                PrimitiveBatch::BackdropBlurs(range) => {
+                    command_encoder.endEncoding();
+                    for blur in &scene.backdrop_blurs[range] {
+                        self.backdrop.run(
+                            &self.device,
+                            blur,
+                            texture,
+                            viewport_size,
+                            &command_buffer,
+                        )?;
+                    }
+                    command_encoder = new_command_encoder_for_texture(
+                        &command_buffer,
+                        texture,
+                        viewport_size,
+                        None,
+                    )?;
                 }
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }

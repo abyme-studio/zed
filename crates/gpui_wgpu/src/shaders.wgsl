@@ -405,7 +405,7 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     solid: Hsla, colors: array<LinearColorStop, 2>) -> GradientColor {
     var result = GradientColor();
 
-    if (tag == 0u || tag == 2u || tag == 3u) {
+    if (tag == 0u || tag == 2u || tag == 3u || tag == 4u || tag == 5u) {
         result.solid = hsla_to_rgba(solid);
     } else if (tag == 1u) {
         // The hsla_to_rgba is returns a linear sRGB color
@@ -508,6 +508,30 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             background_color = solid_color;
             background_color.a *= saturate(should_be_colored);
+        }
+        case 4u: {
+            // Lines colors[0].percentage px wide every size px from the corner, both ways (0),
+            // horizontal (1) or vertical (2).
+            let size = background.gradient_angle_or_pattern_height;
+            let width = background.colors[0].percentage;
+            let lines = u32(background.colors[1].percentage);
+            let at = position - bounds.origin;
+            let into = at - size * floor(at / size);
+            let across = saturate(vec2<f32>(width) - into + 0.5) * saturate(into + 0.5);
+            var cover = 0.0;
+            if (lines != 1u) { cover = max(cover, across.x); }
+            if (lines != 2u) { cover = max(cover, across.y); }
+            background_color = solid_color;
+            background_color.a *= cover;
+        }
+        case 5u: {
+            // A disc of radius colors[0].percentage px at each size px tile's centre.
+            let size = background.gradient_angle_or_pattern_height;
+            let radius = background.colors[0].percentage;
+            let at = position - bounds.origin;
+            let into = at - size * floor(at / size) - size / 2.0;
+            background_color = solid_color;
+            background_color.a *= saturate(radius - length(into) + 0.5);
         }
     }
 
@@ -688,8 +712,8 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     if (border_sdf < antialias_threshold) {
         var border_color = input.border_color;
 
-        // Dashed border logic when border_style == 1
-        if (quad.border_style == 1) {
+        // Dashed border logic when border_style == 1; dotted, 2, lays round dots out the same way.
+        if (quad.border_style == 1 || quad.border_style == 2) {
             // Position along the perimeter in "dash space", where each dash
             // period has length 1
             var t = 0.0;
@@ -702,8 +726,10 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
             // used by browsers, but also avoids dashes from different segments
             // overlapping when dash size is smaller than the border width.
             //
-            // Dash pattern: (2 * border width) dash, (1 * border width) gap
-            let dash_length_per_width = 2.0;
+            // Dash pattern: (2 * border width) dash, (1 * border width) gap; a dot is
+            // (1 * border width) across.
+            let dotted = quad.border_style == 2;
+            let dash_length_per_width = select(2.0, 1.0, dotted);
             let dash_gap_per_width = 1.0;
             let dash_period_per_width = dash_length_per_width + dash_gap_per_width;
 
@@ -859,11 +885,13 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
                 // Adjust dash gap to evenly divide max_t.
                 let dash_count = floor(max_t);
                 let dash_period = max_t / dash_count;
-                border_color.a *= dash_alpha(
+                border_color.a *= dash_or_dot_alpha(
+                    dotted,
                     t,
                     dash_period,
                     dash_length,
                     dash_velocity,
+                    outer_sdf,
                     antialias_threshold);
             } else if (unrounded) {
                 // When there isn't enough space for the full gap between the
@@ -872,11 +900,13 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
                 let dash_gap = max_t - dash_length;
                 if (dash_gap > 0.0) {
                     let dash_period = dash_length + dash_gap;
-                    border_color.a *= dash_alpha(
+                    border_color.a *= dash_or_dot_alpha(
+                        dotted,
                         t,
                         dash_period,
                         dash_length,
                         dash_velocity,
+                        outer_sdf,
                         antialias_threshold);
                 }
             }
@@ -908,6 +938,18 @@ fn corner_dash_velocity(dv1: f32, dv2: f32) -> f32 {
     } else {
         return min(dv1, dv2);
     }
+}
+
+// A dash's alpha, or for a dotted border a round dot's: its diameter the dash's length in pixels,
+// its centre on the border's middle line (outer_sdf is negative inside the outer edge).
+fn dash_or_dot_alpha(dotted: bool, t: f32, period: f32, length: f32, dash_velocity: f32, outer_sdf: f32, antialias_threshold: f32) -> f32 {
+    if (!dotted) {
+        return dash_alpha(t, period, length, dash_velocity, antialias_threshold);
+    }
+    let radius = length / dash_velocity / 2.0;
+    let along = (fmod(t + period / 2.0 - length / 2.0, period) - period / 2.0) / dash_velocity;
+    let across = outer_sdf + radius;
+    return saturate(antialias_threshold - (sqrt(along * along + across * across) - radius));
 }
 
 // Returns alpha used to render antialiased dashes.

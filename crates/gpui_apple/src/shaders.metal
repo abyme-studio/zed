@@ -21,6 +21,9 @@ float4 distance_from_clip_rect(float2 unit_vertex, Bounds_ScaledPixels bounds,
 float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                                Bounds_ScaledPixels clip_bounds, TransformationMatrix transformation);
 float corner_dash_velocity(float dv1, float dv2);
+float dash_or_dot_alpha(bool dotted, float t, float period, float length,
+                        float dash_velocity, float outer_sdf,
+                        float antialias_threshold);
 float dash_alpha(float t, float period, float length, float dash_velocity,
                  float antialias_threshold);
 float quarter_ellipse_sdf(float2 point, float2 radii);
@@ -212,8 +215,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
   if (border_sdf < antialias_threshold) {
     float4 border_color = input.border_color;
 
-    // Dashed border logic when border_style == 1
-    if (quad.border_style == 1) {
+    // Dashed border logic when border_style == 1; dotted, 2, lays round dots
+    // out the same way.
+    if (quad.border_style == 1 || quad.border_style == 2) {
       // Position along the perimeter in "dash space", where each dash
       // period has length 1
       float t = 0.0;
@@ -226,8 +230,10 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
       // used by browsers, but also avoids dashes from different segments
       // overlapping when dash size is smaller than the border width.
       //
-      // Dash pattern: (2 * border width) dash, (1 * border width) gap
-      const float dash_length_per_width = 2.0;
+      // Dash pattern: (2 * border width) dash, (1 * border width) gap; a dot
+      // is (1 * border width) across.
+      bool dotted = quad.border_style == 2;
+      const float dash_length_per_width = dotted ? 1.0 : 2.0;
       const float dash_gap_per_width = 1.0;
       const float dash_period_per_width = dash_length_per_width + dash_gap_per_width;
 
@@ -371,8 +377,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
         // Adjust dash gap to evenly divide max_t
         float dash_count = floor(max_t);
         float dash_period = max_t / dash_count;
-        border_color.a *= dash_alpha(t, dash_period, dash_length, dash_velocity,
-                                     antialias_threshold);
+        border_color.a *= dash_or_dot_alpha(dotted, t, dash_period, dash_length,
+                                            dash_velocity, outer_sdf,
+                                            antialias_threshold);
       } else if (unrounded) {
         // When there isn't enough space for the full gap between the
         // two start / end dashes of a straight border, reduce gap to
@@ -380,8 +387,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
         float dash_gap = max_t - dash_length;
         if (dash_gap > 0.0) {
           float dash_period = dash_length + dash_gap;
-          border_color.a *= dash_alpha(t, dash_period, dash_length, dash_velocity,
-                                       antialias_threshold);
+          border_color.a *= dash_or_dot_alpha(dotted, t, dash_period, dash_length,
+                                              dash_velocity, outer_sdf,
+                                              antialias_threshold);
         }
       }
     }
@@ -412,6 +420,21 @@ float corner_dash_velocity(float dv1, float dv2) {
   } else {
     return min(dv1, dv2);
   }
+}
+
+// A dash's alpha, or for a dotted border a round dot's: its diameter the
+// dash's length in pixels, its centre on the border's middle line (outer_sdf
+// is negative inside the outer edge).
+float dash_or_dot_alpha(bool dotted, float t, float period, float length,
+                        float dash_velocity, float outer_sdf,
+                        float antialias_threshold) {
+  if (!dotted) {
+    return dash_alpha(t, period, length, dash_velocity, antialias_threshold);
+  }
+  float radius = length / dash_velocity / 2.0;
+  float along = (fmod(t + period / 2.0 - length / 2.0, period) - period / 2.0) / dash_velocity;
+  float across = outer_sdf + radius;
+  return saturate(antialias_threshold - (sqrt(along * along + across * across) - radius));
 }
 
 // Returns alpha used to render antialiased dashes.
@@ -1181,7 +1204,7 @@ float4 over(float4 below, float4 above) {
 GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
                                      Hsla color0, Hsla color1) {
   GradientColor out;
-  if (tag == 0 || tag == 2 || tag == 3) {
+  if (tag == 0 || tag == 2 || tag == 3 || tag == 4 || tag == 5) {
     out.solid = hsla_to_rgba(solid);
   } else if (tag == 1) {
     out.color0 = hsla_to_rgba(color0);
@@ -1301,7 +1324,118 @@ float4 fill_color(Background background,
         color.a *= saturate(should_be_colored);
         break;
     }
+    case 4: {
+        // Lines colors[0].percentage wide every size from the corner, both
+        // ways (0), horizontal (1) or vertical (2).
+        float size = background.gradient_angle_or_pattern_height;
+        float width = background.colors[0].percentage;
+        uint lines = uint(background.colors[1].percentage);
+        float2 at = position - float2(bounds.origin.x, bounds.origin.y);
+        float2 into = at - size * floor(at / size);
+        float2 across = saturate(float2(width) - into + 0.5) * saturate(into + 0.5);
+        float cover = 0.0;
+        if (lines != 1) { cover = max(cover, across.x); }
+        if (lines != 2) { cover = max(cover, across.y); }
+        color = solid_color;
+        color.a *= cover;
+        break;
+    }
+    case 5: {
+        // A disc of radius colors[0].percentage at each size tile's centre.
+        float size = background.gradient_angle_or_pattern_height;
+        float radius = background.colors[0].percentage;
+        float2 at = position - float2(bounds.origin.x, bounds.origin.y);
+        float2 into = at - size * floor(at / size) - size / 2.0;
+        color = solid_color;
+        color.a *= saturate(radius - length(into) + 0.5);
+        break;
+    }
   }
 
   return color;
+}
+
+// A backdrop blur's passes (BackdropBlur): the region under the box, copied out
+// of the target, blurred by dual Kawase, two passes down to a quarter and one up
+// to a half, and the last pass up drawn back into the target inside the box's
+// corners and clip.
+struct BlurParams {
+  // The region copied out: its top left in the target, and its size, device px.
+  float4 region;
+  float4 bounds;
+  float4 mask;
+  // top left, top right, bottom right, bottom left
+  float4 radii;
+  // How many full-size px a texel of the source and of the destination is; the
+  // sample offset in source texels.
+  float src_div;
+  float dst_div;
+  float offset;
+  float pad;
+};
+
+constexpr sampler blur_sampler(filter::linear, address::clamp_to_edge);
+
+vertex float4 blur_vertex(uint vertex_id [[vertex_id]]) {
+  float2 xy = float2(float((vertex_id << 1) & 2), float(vertex_id & 2));
+  return float4(xy.x * 2.0 - 1.0, 1.0 - xy.y * 2.0, 0.0, 1.0);
+}
+
+// A destination pixel's place in the source texture, both regions starting at
+// texel 0.
+float2 blur_src_uv(float2 region_px, constant BlurParams &p, texture2d<float> src) {
+  return region_px / p.src_div / float2(src.get_width(), src.get_height());
+}
+
+float4 blur_down(float2 uv, constant BlurParams &p, texture2d<float> src) {
+  float2 h = p.offset / float2(src.get_width(), src.get_height());
+  float4 c = src.sample(blur_sampler, uv) * 4.0;
+  c += src.sample(blur_sampler, uv - h);
+  c += src.sample(blur_sampler, uv + h);
+  c += src.sample(blur_sampler, uv + float2(h.x, -h.y));
+  c += src.sample(blur_sampler, uv - float2(h.x, -h.y));
+  return c / 8.0;
+}
+
+float4 blur_up(float2 uv, constant BlurParams &p, texture2d<float> src) {
+  float2 h = p.offset / float2(src.get_width(), src.get_height());
+  float4 c = src.sample(blur_sampler, uv + float2(-h.x * 2.0, 0.0));
+  c += src.sample(blur_sampler, uv + float2(-h.x, h.y)) * 2.0;
+  c += src.sample(blur_sampler, uv + float2(0.0, h.y * 2.0));
+  c += src.sample(blur_sampler, uv + float2(h.x, h.y)) * 2.0;
+  c += src.sample(blur_sampler, uv + float2(h.x * 2.0, 0.0));
+  c += src.sample(blur_sampler, uv + float2(h.x, -h.y)) * 2.0;
+  c += src.sample(blur_sampler, uv + float2(0.0, -h.y * 2.0));
+  c += src.sample(blur_sampler, uv + float2(-h.x, -h.y)) * 2.0;
+  return c / 12.0;
+}
+
+fragment float4 blur_down_fragment(float4 position [[position]],
+                                   constant BlurParams &p [[buffer(0)]],
+                                   texture2d<float> src [[texture(0)]]) {
+  return blur_down(blur_src_uv(position.xy * p.dst_div, p, src), p, src);
+}
+
+fragment float4 blur_up_fragment(float4 position [[position]],
+                                 constant BlurParams &p [[buffer(0)]],
+                                 texture2d<float> src [[texture(0)]]) {
+  return blur_up(blur_src_uv(position.xy * p.dst_div, p, src), p, src);
+}
+
+// Back into the target: inside the box's rounded corners, antialiased, and its
+// clip. Premultiplied, as the target is.
+fragment float4 blur_back_fragment(float4 position [[position]],
+                                   constant BlurParams &p [[buffer(0)]],
+                                   texture2d<float> src [[texture(0)]]) {
+  float4 c = blur_up(blur_src_uv(position.xy - p.region.xy, p, src), p, src);
+  float2 half_size = p.bounds.zw / 2.0;
+  float2 d = position.xy - (p.bounds.xy + half_size);
+  float r = d.y > 0.0 ? (d.x > 0.0 ? p.radii.z : p.radii.w)
+                      : (d.x > 0.0 ? p.radii.y : p.radii.x);
+  r = min(r, min(half_size.x, half_size.y));
+  float2 q = fabs(d) - half_size + r;
+  float sdf = length(max(q, float2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+  bool inside = all(position.xy >= p.mask.xy) && all(position.xy < p.mask.xy + p.mask.zw);
+  float cover = saturate(0.5 - sdf) * (inside ? 1.0 : 0.0);
+  return c * cover;
 }

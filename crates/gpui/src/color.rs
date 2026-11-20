@@ -747,6 +747,8 @@ pub(crate) enum BackgroundTag {
     LinearGradient = 1,
     PatternSlash = 2,
     Checkerboard = 3,
+    PatternLines = 4,
+    PatternDots = 5,
 }
 
 /// A color space for color interpolation.
@@ -805,6 +807,19 @@ impl std::fmt::Debug for Background {
                 "Checkerboard({:?}, {})",
                 self.solid, self.gradient_angle_or_pattern_height
             ),
+            BackgroundTag::PatternLines => write!(
+                f,
+                "PatternLines({:?}, {}, {}, {})",
+                self.solid,
+                self.gradient_angle_or_pattern_height,
+                self.colors[0].percentage,
+                self.colors[1].percentage
+            ),
+            BackgroundTag::PatternDots => write!(
+                f,
+                "PatternDots({:?}, {}, {})",
+                self.solid, self.gradient_angle_or_pattern_height, self.colors[0].percentage
+            ),
         }
     }
 }
@@ -845,6 +860,45 @@ pub fn checkerboard(color: impl Into<Hsla>, size: f32) -> Background {
         gradient_angle_or_pattern_height: size,
         ..Default::default()
     }
+}
+
+/// Which way the lines of [`pattern_lines`] run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternLines {
+    /// Both ways: a grid.
+    Grid = 0,
+    /// Horizontal lines only.
+    Horizontal = 1,
+    /// Vertical lines only.
+    Vertical = 2,
+}
+
+/// Creates a background of lines `width` wide every `size` from the bounds' top left corner, in
+/// scaled pixels as [`checkerboard`]'s size: CSS's tiled `linear-gradient` grid lines.
+pub fn pattern_lines(color: impl Into<Hsla>, size: f32, width: f32, lines: PatternLines) -> Background {
+    let mut background = Background {
+        tag: BackgroundTag::PatternLines,
+        solid: color.into(),
+        gradient_angle_or_pattern_height: size,
+        ..Default::default()
+    };
+    background.colors[0].percentage = width;
+    background.colors[1].percentage = lines as u32 as f32;
+    background
+}
+
+/// Creates a background of discs of `radius`, one at the centre of each `size` tile from the
+/// bounds' top left corner, in scaled pixels as [`checkerboard`]'s size: CSS's tiled
+/// `radial-gradient` dots.
+pub fn pattern_dots(color: impl Into<Hsla>, size: f32, radius: f32) -> Background {
+    let mut background = Background {
+        tag: BackgroundTag::PatternDots,
+        solid: color.into(),
+        gradient_angle_or_pattern_height: size,
+        ..Default::default()
+    };
+    background.colors[0].percentage = radius;
+    background
 }
 
 /// Creates a solid background color.
@@ -943,6 +997,7 @@ impl Background {
             BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
+            BackgroundTag::PatternLines | BackgroundTag::PatternDots => self.solid.is_transparent(),
         }
     }
 }
