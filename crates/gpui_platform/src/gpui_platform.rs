@@ -62,6 +62,7 @@ pub fn web_init() {
 pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
     cfg_select! {
         target_os = "ios" => gpui_ios::current_platform(headless),
+        target_os = "android" => gpui_android::current_platform(headless),
         target_os = "macos" => Rc::new(gpui_macos::MacPlatform::new(headless)),
         target_os = "windows" => Rc::new(
             gpui_windows::WindowsPlatform::new(headless)
