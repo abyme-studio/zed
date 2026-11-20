@@ -5,7 +5,7 @@
 //! to frame, at the target's size.
 
 use anyhow::{Context as _, Result};
-use gpui::{BackdropBlur, DevicePixels, Size};
+use gpui::BackdropBlur;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
@@ -93,7 +93,6 @@ impl Backdrop {
         device: &ProtocolObject<dyn MTLDevice>,
         blur: &BackdropBlur,
         target: &ProtocolObject<dyn MTLTexture>,
-        viewport_size: Size<DevicePixels>,
         command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
     ) -> Result<()> {
         let (tw, th) = (target.width() as f32, target.height() as f32);
@@ -121,8 +120,8 @@ impl Backdrop {
         let [full, half, quarter, up] = self.textures(
             device,
             format,
-            viewport_size.width.0.max(1) as usize,
-            viewport_size.height.0.max(1) as usize,
+            target.width().max(1),
+            target.height().max(1),
         )?;
         let r = blur.corner_radii;
         let mut params = BlurParams {
