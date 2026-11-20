@@ -2568,7 +2568,6 @@ impl WgpuRendererCore {
             self.resources.device.limits().max_buffer_size
         );
         let readback_buffer = self
-            .core
             .resources
             .device
             .create_buffer(&wgpu::BufferDescriptor {
@@ -2606,7 +2605,6 @@ impl WgpuRendererCore {
             },
         );
         let submission = self
-            .core
             .resources
             .queue
             .submit(std::iter::once(encoder.finish()));
