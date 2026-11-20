@@ -69,6 +69,7 @@ pub(crate) struct AndroidWindowState {
     title: RefCell<String>,
     back_enabled: Cell<bool>,
     pub(crate) input_handler: CallbackSlot<PlatformInputHandler>,
+    pub(crate) text_input: super::text_input::TextInput,
     request_frame_callback: CallbackSlot<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) input_callback: CallbackSlot<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     active_status_callback: CallbackSlot<Box<dyn FnMut(bool)>>,
@@ -262,6 +263,7 @@ impl AndroidWindow {
             title: RefCell::new(String::new()),
             back_enabled: Cell::new(false),
             input_handler: CallbackSlot::default(),
+            text_input: Default::default(),
             request_frame_callback: CallbackSlot::default(),
             input_callback: CallbackSlot::default(),
             active_status_callback: CallbackSlot::default(),
@@ -355,6 +357,14 @@ impl PlatformWindow for AndroidWindow {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.0.input_handler.take()
+    }
+
+    fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
+        self.0.text_input.state_changed(&self.0.app, &self.0.input_handler, change);
+    }
+
+    fn set_text_input_configuration(&mut self, configuration: gpui::TextInputConfiguration) {
+        self.0.text_input.set_configuration(&self.0.app, configuration);
     }
 
     fn prompt(

@@ -4,6 +4,7 @@ mod dispatcher;
 mod display;
 mod input;
 mod platform;
+mod text_input;
 mod window;
 
 use std::cell::{Cell, RefCell};
