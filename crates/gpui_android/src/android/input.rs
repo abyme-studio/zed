@@ -20,6 +20,23 @@ pub(crate) fn drain(app: &AndroidApp, window: &AndroidWindowState, scale: f32) {
         let more = events.next(|event| match event {
             InputEvent::MotionEvent(motion) => motion_event(window, motion, scale),
             InputEvent::KeyEvent(key) => key_event(app, window, key),
+            InputEvent::TextEvent(state) => {
+                window.text_input.apply(state, &window.input_handler);
+                InputStatus::Handled
+            }
+            InputEvent::TextAction(_) => {
+                // The keyboard's action key: GPUI binds it as enter.
+                let keystroke = Keystroke { modifiers: Modifiers::default(), key: "enter".into(), key_char: None };
+                window.input_callback.with(|callback| {
+                    callback(PlatformInput::KeyDown(KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }));
+                    callback(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+                });
+                InputStatus::Handled
+            }
             _ => InputStatus::Unhandled,
         });
         if !more {
