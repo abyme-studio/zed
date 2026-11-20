@@ -283,12 +283,19 @@ impl WebWindowInner {
                 return;
             }
 
-            let button = dom_mouse_button_to_gpui(event.button());
-            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            let (button, modifiers) = secondary_press(
+                dom_mouse_button_to_gpui(event.button()),
+                modifiers_from_mouse_event(&event, this.is_mac),
+                this.is_mac,
+            );
             let time = js_sys::Date::now();
 
             this.pressed_button.set(Some(button));
-            let click_count = this.click_state.borrow_mut().register_click(position, time);
+            let mut click_count = this.click_state.borrow_mut().register_click(position, time);
+            if button == MouseButton::Right && event.button() == 0 {
+                // As gpui_macos counts a ctrl-click: one click, never a double.
+                click_count = 1;
+            }
 
             {
                 let mut current_state = this.state.borrow_mut();
@@ -369,8 +376,15 @@ impl WebWindowInner {
                 return;
             }
 
-            let button = dom_mouse_button_to_gpui(event.button());
-            let modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            let mut button = dom_mouse_button_to_gpui(event.button());
+            let mut modifiers = modifiers_from_mouse_event(&event, this.is_mac);
+            // The release of a ctrl-click is the release of the right press it began.
+            if button == MouseButton::Left && this.pressed_button.get() == Some(MouseButton::Right) {
+                button = MouseButton::Right;
+                if this.is_mac {
+                    modifiers.control = false;
+                }
+            }
 
             this.pressed_button.set(None);
             let click_count = this.click_state.borrow().current_count;
@@ -1250,6 +1264,15 @@ fn dom_key_to_gpui_key(event: &web_sys::KeyboardEvent) -> String {
             other.to_lowercase()
         }
     }
+}
+
+/// On macOS a ctrl-left press is a right press, its control dropped, as gpui_macos makes it
+/// (gpui_macos/src/window.rs, "a ctrl-left click should be handled as a right click").
+fn secondary_press(button: MouseButton, modifiers: Modifiers, is_mac: bool) -> (MouseButton, Modifiers) {
+    if is_mac && button == MouseButton::Left && modifiers.control {
+        return (MouseButton::Right, Modifiers { control: false, ..modifiers });
+    }
+    (button, modifiers)
 }
 
 fn dom_mouse_button_to_gpui(button: i16) -> MouseButton {
