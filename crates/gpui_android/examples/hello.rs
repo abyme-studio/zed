@@ -21,7 +21,7 @@ mod app {
     use crate::{Backspace, Copy, Delete, End, Home, Left, Paste, Right};
     use gpui::{
         App, ClipboardItem, Context, Entity, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render,
-        SharedString, StatefulInteractiveElement, Styled, Window, WindowOptions, div, prelude::*,
+        Role, SharedString, StatefulInteractiveElement, Styled, Window, WindowOptions, div, prelude::*,
         px, rgb,
     };
 
@@ -86,6 +86,8 @@ mod app {
                 .child(
                     div()
                         .id("tap")
+                        .role(Role::Button)
+                        .aria_label(SharedString::from(format!("Tapped {} times", self.taps)))
                         .mx_4()
                         .p_3()
                         .rounded_md()
