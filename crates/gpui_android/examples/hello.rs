@@ -114,7 +114,14 @@ mod app {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: android_activity::AndroidApp) {
-    android_logger::init_once(android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("gpui"));
+    // android_activity calls each poll that ran Choreographer's vsync callback "spurious", at error,
+    // once a frame: its activity_impl is kept quiet.
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_filter(android_logger::FilterBuilder::new().parse("info,android_activity::activity_impl=off").build())
+            .with_tag("gpui"),
+    );
     gpui_android::set_android_app(app);
     app::run();
 }
