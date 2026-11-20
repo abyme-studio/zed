@@ -320,8 +320,15 @@ impl WebWindow {
                         .device_pixel_content_box_size()
                         .get(0)
                         .unchecked_into();
-                    let pw = size.inline_size() as u32;
-                    let ph = size.block_size() as u32;
+                    let rect = entry.content_rect();
+                    let (cw, ch) = (rect.width() * dpr, rect.height() * dpr);
+                    let (pw, ph) = (size.inline_size(), size.block_size());
+                    // Chromium's device emulation (DevTools, Playwright's deviceScaleFactor) answers the
+                    // device box at the real display's scale while devicePixelRatio says the emulated
+                    // one: a box more than a pixel or two off the CSS box times the ratio is that, and
+                    // the CSS box is used.
+                    let (pw, ph) = if (pw - cw).abs() > 2.0 || (ph - ch).abs() > 2.0 { (cw.round(), ch.round()) } else { (pw, ph) };
+                    let (pw, ph) = (pw as u32, ph as u32);
                     let lw = pw as f64 / dpr;
                     let lh = ph as f64 / dpr;
                     (pw, ph, lw as f32, lh as f32)
