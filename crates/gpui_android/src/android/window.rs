@@ -84,6 +84,8 @@ pub(crate) struct AndroidWindowState {
     appearance_changed_callback: CallbackSlot<Box<dyn FnMut()>>,
     insets_changed_callback: CallbackSlot<Box<dyn FnMut(WindowInsets)>>,
     pub(crate) back_callback: CallbackSlot<Box<dyn FnMut()>>,
+    /// TalkBack's adapter, once GPUI starts accessibility.
+    a11y: RefCell<Option<super::a11y::A11y>>,
 }
 
 /// The activity's density as GPUI's scale: Android's dp is 1/160 inch.
@@ -278,6 +280,7 @@ impl AndroidWindow {
             appearance_changed_callback: CallbackSlot::default(),
             insets_changed_callback: CallbackSlot::default(),
             back_callback: CallbackSlot::default(),
+            a11y: RefCell::new(None),
         });
         // The platform starts GPUI once the activity has a surface, so the renderer and its atlas
         // exist before GPUI asks for them.
@@ -492,6 +495,16 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+
+    fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        self.0.a11y.replace(super::a11y::A11y::new(&self.0.app, callbacks));
+    }
+
+    fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
+        if let Some(a11y) = self.0.a11y.borrow_mut().as_mut() {
+            a11y.update(tree_update);
+        }
+    }
 
     fn insets(&self) -> WindowInsets {
         self.0.insets.borrow().clone()
