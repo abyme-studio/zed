@@ -920,7 +920,6 @@ impl MetalRenderer {
                             &self.device,
                             blur,
                             texture,
-                            viewport_size,
                             &command_buffer,
                         )?;
                     }
