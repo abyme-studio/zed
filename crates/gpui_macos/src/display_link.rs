@@ -342,10 +342,13 @@ impl MetalFrames {
     }
 }
 
-/// A window's `CVDisplayLink` frames, paced as [`MetalFrames`] paces the Metal
-/// link: after a request in which GPUI neither drew nor asked for another
-/// frame, the window leaves its display's link, and GPUI's frame waker joins
-/// it again. Without this a window on the `CVDisplayLink` calls GPUI at every
+/// A window's `CVDisplayLink` frames, paced much as [`MetalFrames`] paces the
+/// Metal link: after [`LinkFrames::IDLE_REQUESTS`] requests in a row in which
+/// GPUI neither drew nor asked for another frame, the window leaves its
+/// display's link, and GPUI's frame waker joins it again. Leaving after one
+/// idle request would leave and join between the frames of a scroll, whose
+/// input arrives at about the display's rate, and a joined link's first frame
+/// is off the display's beat. Without this a window on the `CVDisplayLink` calls GPUI at every
 /// vsync while idle. Shared with the waker, so a wake never takes the
 /// window's lock.
 #[derive(Default)]
@@ -358,9 +361,15 @@ pub struct LinkFrames {
     woken: Cell<bool>,
     /// Whether GPUI drew since the current request began.
     drew: Cell<bool>,
+    /// Requests in a row in which GPUI neither drew nor asked for a frame.
+    idle_requests: Cell<u32>,
 }
 
 impl LinkFrames {
+    /// Idle requests in a row before the window leaves the link: half a second
+    /// at 60 Hz.
+    pub const IDLE_REQUESTS: u32 = 30;
+
     pub fn start(
         &self,
         display_id: CGDirectDisplayID,
@@ -418,13 +427,23 @@ impl LinkFrames {
         self.drew.set(false);
     }
 
-    /// Ends a request, leaving the display's link if GPUI neither drew nor
-    /// asked for another frame while it ran. Returns whether it paused.
+    /// Ends a request, leaving the display's link once GPUI has neither drawn
+    /// nor asked for another frame for [`Self::IDLE_REQUESTS`] requests in a
+    /// row. Returns whether it paused.
     pub fn end_frame(&self) -> bool {
-        let pause = !self.drew.get() && !self.woken.get() && self.display.get().is_some();
+        if self.drew.get() || self.woken.get() || self.display.get().is_none() {
+            self.idle_requests.set(0);
+            return false;
+        }
+        let idle_requests = self.idle_requests.get() + 1;
+        self.idle_requests.set(idle_requests);
+        let pause = idle_requests >= Self::IDLE_REQUESTS;
         if pause && let Some(source) = self.source.borrow_mut().as_mut() {
             source.stop();
             self.paused.set(true);
+        }
+        if pause {
+            self.idle_requests.set(0);
         }
         pause
     }
@@ -682,14 +701,28 @@ mod tests {
     // The display link registry lives on the main thread, which cargo's test
     // threads are not, so this checks the decision with no source attached.
     #[test]
-    fn link_frames_leave_the_link_only_when_gpui_neither_draws_nor_asks_again() {
+    fn link_frames_leave_the_link_only_after_a_run_of_idle_requests() {
         let frames = LinkFrames::default();
         frames.display.set(Some(1));
+        let idle = |count: u32| {
+            (0..count).all(|_| {
+                frames.begin_frame();
+                !frames.end_frame()
+            })
+        };
 
+        assert!(
+            idle(LinkFrames::IDLE_REQUESTS - 1),
+            "a short lull keeps the link"
+        );
         frames.begin_frame();
         frames.drew();
         assert!(!frames.end_frame(), "a frame that drew keeps the link");
 
+        assert!(
+            idle(LinkFrames::IDLE_REQUESTS - 1),
+            "a draw starts the count again"
+        );
         frames.begin_frame();
         frames.wake();
         assert!(
@@ -697,19 +730,15 @@ mod tests {
             "a wake during the request keeps the link"
         );
 
-        frames.wake();
+        assert!(idle(LinkFrames::IDLE_REQUESTS - 1));
         frames.begin_frame();
-        assert!(
-            frames.end_frame(),
-            "a wake before the request was served by it"
-        );
-
-        frames.begin_frame();
-        assert!(frames.end_frame(), "an idle request leaves the link");
+        assert!(frames.end_frame(), "a run of idle requests leaves the link");
 
         frames.display.set(None);
-        frames.begin_frame();
-        assert!(!frames.end_frame(), "a stopped window has no link to leave");
+        assert!(
+            idle(LinkFrames::IDLE_REQUESTS * 2),
+            "a stopped window has no link to leave"
+        );
     }
 
     #[test]
