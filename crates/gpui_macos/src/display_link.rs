@@ -679,18 +679,12 @@ mod tests {
     use objc2::AnyThread;
     use objc2_quartz_core::CAMetalDisplayLink;
 
-    extern "C" fn no_frame(_: *mut c_void) {}
-
+    // The display link registry lives on the main thread, which cargo's test
+    // threads are not, so this checks the decision with no source attached.
     #[test]
     fn link_frames_leave_the_link_only_when_gpui_neither_draws_nor_asks_again() {
         let frames = LinkFrames::default();
-        let display = core_graphics::display::CGDisplay::main().id;
-        if frames
-            .start(display, std::ptr::null_mut(), no_frame)
-            .is_err()
-        {
-            return;
-        }
+        frames.display.set(Some(1));
 
         frames.begin_frame();
         frames.drew();
@@ -703,19 +697,19 @@ mod tests {
             "a wake during the request keeps the link"
         );
 
+        frames.wake();
+        frames.begin_frame();
+        assert!(
+            frames.end_frame(),
+            "a wake before the request was served by it"
+        );
+
         frames.begin_frame();
         assert!(frames.end_frame(), "an idle request leaves the link");
-        assert!(frames.paused.get());
 
-        frames.wake();
-        assert!(!frames.paused.get(), "a wake joins the link again");
-
-        frames.stop();
+        frames.display.set(None);
         frames.begin_frame();
         assert!(!frames.end_frame(), "a stopped window has no link to leave");
-        frames.wake();
-        assert!(!frames.paused.get());
-        frames.close();
     }
 
     #[test]

@@ -136,3 +136,46 @@ unsafe impl RefEncode for NSRange {
 fn ns_string(string: &str) -> *mut AnyObject {
     Retained::autorelease_ptr(NSString::from_str(string)).cast()
 }
+
+#[cfg(test)]
+mod renderer_start {
+    use gpui::{Bounds, ContentMask, DevicePixels, Hsla, Quad, ScaledPixels, Scene, point, size};
+    use std::time::Instant;
+
+    /// Where a window's first frame spends its time, by renderer: run with
+    /// `cargo test -p gpui_macos renderer_start -- --ignored --nocapture`, with
+    /// and without `--features metal-renderer`.
+    #[test]
+    #[ignore]
+    fn times_the_first_frame() {
+        let started = Instant::now();
+        let mut renderer = super::renderer::new_renderer(Default::default(), false, false).unwrap();
+        let created = started.elapsed();
+        renderer.update_drawable_size(size(DevicePixels(1200), DevicePixels(800)));
+        let mut scene = Scene::default();
+        let bounds = Bounds::new(
+            point(ScaledPixels(0.), ScaledPixels(0.)),
+            size(ScaledPixels(600.), ScaledPixels(400.)),
+        );
+        scene.insert_primitive(Quad {
+            bounds,
+            content_mask: ContentMask { bounds },
+            background: Hsla::red().into(),
+            border_color: Hsla::red(),
+            ..Default::default()
+        });
+        scene.finish();
+        let drawing = Instant::now();
+        renderer.draw(&scene);
+        let first = drawing.elapsed();
+        let drawing = Instant::now();
+        renderer.draw(&scene);
+        let second = drawing.elapsed();
+        println!(
+            "renderer start: create {:.1} ms, first draw {:.1} ms, second draw {:.1} ms",
+            created.as_secs_f64() * 1e3,
+            first.as_secs_f64() * 1e3,
+            second.as_secs_f64() * 1e3
+        );
+    }
+}
