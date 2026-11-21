@@ -367,8 +367,11 @@ impl Platform for AndroidPlatform {
         }
         // Whatever GPUI queued as it closed.
         dispatcher::drain(&mut state.main_queue.borrow_mut());
-        // GPUI cannot start again on the next activity's thread (see `set_android_app`).
-        std::process::exit(0);
+        // GPUI cannot start again on the next activity's thread (see `set_android_app`). `_exit`, not
+        // `exit`: the C++ glue's static destructors would run on this thread with the main thread's
+        // JNIEnv, which CheckJNI aborts on, while the main thread waits in `onDestroy` (an ANR).
+        // SAFETY: ends the process; nothing after it runs.
+        unsafe { libc::_exit(0) };
     }
 
     fn quit(&self) {
