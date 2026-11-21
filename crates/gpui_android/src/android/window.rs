@@ -17,7 +17,7 @@ use gpui::{
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
     WindowParams, WindowVisibility, px, size,
 };
-use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{GpuContext, WgpuAtlas, WgpuRenderer, WgpuSurfaceConfig};
 use ndk::native_window::NativeWindow;
 use raw_window_handle::{
     AndroidDisplayHandle, AndroidNdkWindowHandle, DisplayHandle, HandleError, HasDisplayHandle,
@@ -58,6 +58,9 @@ pub(crate) struct AndroidWindowState {
     app: AndroidApp,
     gpu_context: GpuContext,
     renderer: RefCell<Option<WgpuRenderer>>,
+    /// A window beyond the activity's own opens before its surface comes: GPUI takes its atlas at
+    /// once and keeps it, so the atlas is made then, and its renderer draws from it.
+    atlas: Option<Arc<WgpuAtlas>>,
     native: RefCell<Option<RawWindow>>,
     /// The surface's size in device pixels.
     device_size: Cell<Size<DevicePixels>>,
@@ -131,7 +134,7 @@ impl AndroidWindowState {
                         .ok_or_else(|| anyhow::anyhow!("the GPU context is gone"))?;
                     renderer.replace_surface(&raw, config, &instance)?;
                 }
-                None => *renderer = Some(WgpuRenderer::new(self.gpu_context.clone(), &raw, config, None)?),
+                None => *renderer = Some(WgpuRenderer::new_with_atlas(self.gpu_context.clone(), &raw, config, None, self.atlas.clone())?),
             }
         }
         self.native.replace(Some(raw));
@@ -258,6 +261,8 @@ impl AndroidWindow {
         gpu_context: GpuContext,
         other: Option<u64>,
     ) -> anyhow::Result<Self> {
+        // The GPU context is the first window's, made with its surface.
+        let atlas = other.and_then(|_| gpu_context.borrow().as_ref().map(|c| Arc::new(WgpuAtlas::from_context(c))));
         let state = Rc::new(AndroidWindowState {
             handle,
             other,
@@ -265,6 +270,7 @@ impl AndroidWindow {
             app: app.clone(),
             gpu_context,
             renderer: RefCell::new(None),
+            atlas,
             native: RefCell::new(None),
             device_size: Cell::new(size(DevicePixels(1), DevicePixels(1))),
             visibility: Cell::new(WindowVisibility::Hidden),
@@ -499,10 +505,13 @@ impl PlatformWindow for AndroidWindow {
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         match self.0.renderer.borrow().as_ref() {
             Some(renderer) => renderer.sprite_atlas().clone(),
-            None => {
-                log::warn!("gpui_android: a window opened before the activity had a surface draws nothing");
-                Arc::new(HeadlessAtlas::default())
-            }
+            None => match &self.0.atlas {
+                Some(atlas) => atlas.clone(),
+                None => {
+                    log::warn!("gpui_android: a window opened before the activity had a surface draws nothing");
+                    Arc::new(HeadlessAtlas::default())
+                }
+            },
         }
     }
 

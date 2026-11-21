@@ -304,6 +304,21 @@ impl WgpuRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
+        Self::new_with_atlas(gpu_context, window, config, compositor_gpu, None)
+    }
+
+    /// As `new`, drawing from `atlas` when given: one made before the window had a surface, which
+    /// GPUI already holds (`WgpuAtlas::from_context` on the same context).
+    pub fn new_with_atlas<W>(
+        gpu_context: GpuContext,
+        window: &W,
+        config: WgpuSurfaceConfig,
+        compositor_gpu: Option<CompositorGpuHint>,
+        atlas: Option<Arc<WgpuAtlas>>,
+    ) -> anyhow::Result<Self>
+    where
+        W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
+    {
         let window_handle = window
             .window_handle()
             .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
@@ -347,7 +362,7 @@ impl WgpuRenderer {
             )?),
         };
 
-        let atlas = Arc::new(WgpuAtlas::from_context(context));
+        let atlas = atlas.unwrap_or_else(|| Arc::new(WgpuAtlas::from_context(context)));
 
         Self::new_internal(
             Some(Rc::clone(&gpu_context)),
