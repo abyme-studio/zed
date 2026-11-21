@@ -233,12 +233,21 @@ fn linear_to_srgba(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(linear_to_srgb(color.rgb), color.a);
 }
 
+/// A gradient's Oklab stops decode and encode by a 2.2 power, as Metal's shader does.
+fn gamma_to_linear(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(max(color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)), color.a);
+}
+
+fn linear_to_gamma(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(max(color.rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)), color.a);
+}
+
 /// Convert a sRGBA color to linear space.
 fn srgba_to_linear(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(color.rgb), color.a);
 }
 
-/// Hsla to linear RGBA conversion.
+/// Hsla to non-linear sRGB RGBA conversion.
 fn hsla_to_rgba(hsla: Hsla) -> vec4<f32> {
     let h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
     let s = hsla.s;
@@ -408,20 +417,17 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
     if (tag == 0u || tag == 2u || tag == 3u || tag == 4u || tag == 5u) {
         result.solid = hsla_to_rgba(solid);
     } else if (tag == 1u) {
-        // The hsla_to_rgba is returns a linear sRGB color
+        // hsla_to_rgba answers non-linear sRGB, which the Unorm target takes as it is, as
+        // Metal's shader does: an sRGB gradient mixes these, an Oklab one decodes them first.
         result.color0 = hsla_to_rgba(colors[0].color);
         result.color1 = hsla_to_rgba(colors[1].color);
 
         // Prepare color space in vertex for avoid conversion
         // in fragment shader for performance reasons
-        if (color_space == 0u) {
-            // sRGB
-            result.color0 = linear_to_srgba(result.color0);
-            result.color1 = linear_to_srgba(result.color1);
-        } else if (color_space == 1u) {
+        if (color_space == 1u) {
             // Oklab
-            result.color0 = linear_srgb_to_oklab(result.color0);
-            result.color1 = linear_srgb_to_oklab(result.color1);
+            result.color0 = linear_srgb_to_oklab(gamma_to_linear(result.color0));
+            result.color1 = linear_srgb_to_oklab(gamma_to_linear(result.color1));
         }
     }
 
@@ -470,11 +476,11 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             switch (background.color_space) {
                 default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
+                    background_color = mix(color0, color1, t);
                 }
                 case 1u: {
                     let oklab_color = mix(color0, color1, t);
-                    background_color = oklab_to_linear_srgb(oklab_color);
+                    background_color = linear_to_gamma(oklab_to_linear_srgb(oklab_color));
                 }
             }
         }
