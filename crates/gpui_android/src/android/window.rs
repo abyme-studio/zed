@@ -53,6 +53,8 @@ impl HasDisplayHandle for RawWindow {
 
 pub(crate) struct AndroidWindowState {
     pub(crate) handle: AnyWindowHandle,
+    /// A window beyond the activity's own, on a surface the app hands over (others.rs): its id.
+    pub(crate) other: Option<u64>,
     app: AndroidApp,
     gpu_context: GpuContext,
     renderer: RefCell<Option<WgpuRenderer>>,
@@ -232,6 +234,13 @@ impl AndroidWindowState {
         self.back_enabled.get() && self.back_callback.is_set()
     }
 
+    /// Closed from outside GPUI (its activity ended): GPUI is asked first, as for a close button,
+    /// so whatever listens hears it; then the window closes whatever it answers.
+    pub(crate) fn end(&self) {
+        self.should_close_callback.with(|callback| callback());
+        self.close();
+    }
+
     pub(crate) fn close(&self) {
         if let Some(callback) = self.close_callback.take() {
             callback();
@@ -247,9 +256,11 @@ impl AndroidWindow {
         _params: WindowParams,
         app: AndroidApp,
         gpu_context: GpuContext,
+        other: Option<u64>,
     ) -> anyhow::Result<Self> {
         let state = Rc::new(AndroidWindowState {
             handle,
+            other,
             scale: Cell::new(scale_of(&app)),
             app: app.clone(),
             gpu_context,
@@ -283,8 +294,10 @@ impl AndroidWindow {
             a11y: RefCell::new(None),
         });
         // The platform starts GPUI once the activity has a surface, so the renderer and its atlas
-        // exist before GPUI asks for them.
-        if let Some(window) = app.native_window() {
+        // exist before GPUI asks for them. Another window's surface comes later, from the app.
+        if other.is_none()
+            && let Some(window) = app.native_window()
+        {
             state.attach(window)?;
         }
         Ok(Self(state))
@@ -363,10 +376,17 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
+        // The keyboard is the activity's own: another window takes no text yet.
+        if self.0.other.is_some() {
+            return;
+        }
         self.0.text_input.state_changed(&self.0.app, &self.0.input_handler, change);
     }
 
     fn set_text_input_configuration(&mut self, configuration: gpui::TextInputConfiguration) {
+        if self.0.other.is_some() {
+            return;
+        }
         self.0.text_input.set_configuration(&self.0.app, configuration);
     }
 
@@ -497,6 +517,10 @@ impl PlatformWindow for AndroidWindow {
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        // TalkBack's tree is the activity's own: another window has none yet.
+        if self.0.other.is_some() {
+            return;
+        }
         self.0.a11y.replace(super::a11y::A11y::new(&self.0.app, callbacks));
     }
 
@@ -523,11 +547,15 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn show_soft_keyboard(&self) {
-        self.0.app.show_soft_input(true);
+        if self.0.other.is_none() {
+            self.0.app.show_soft_input(true);
+        }
     }
 
     fn hide_soft_keyboard(&self) {
-        self.0.app.hide_soft_input(true);
+        if self.0.other.is_none() {
+            self.0.app.hide_soft_input(true);
+        }
     }
 }
 
@@ -537,5 +565,8 @@ impl Drop for AndroidWindow {
             renderer.destroy();
         }
         self.0.native.replace(None);
+        if let Some(id) = self.0.other {
+            super::others::closed(id);
+        }
     }
 }

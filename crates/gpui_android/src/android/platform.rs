@@ -4,7 +4,8 @@
 //! `poll_events`, woken by the activity, by GPUI's dispatcher and by Choreographer's frame
 //! callbacks; handles the activity's lifecycle; drains GPUI's main-thread queue; and draws a frame
 //! on each vsync while a window has a surface. GPUI is started once the activity has its first
-//! surface, so a window's renderer exists before GPUI draws.
+//! surface, so a window's renderer exists before GPUI draws. Windows after the first are on
+//! surfaces the app hands over (others.rs).
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ use gpui::{
 use gpui_wgpu::{CosmicTextSystem, GpuContext};
 
 use super::window::{AndroidWindowState, scale_of};
+use super::others::{self, Told};
 use super::{AndroidDisplay, AndroidWindow, CallbackSlot, dispatcher, input};
 
 /// Set by Choreographer's frame callback, read by the event loop after the wake it sends.
@@ -37,6 +39,13 @@ static WAKER: OnceLock<AndroidAppWaker> = OnceLock::new();
 unsafe extern "C" fn on_frame(_frame_time_nanos: std::os::raw::c_long, _data: *mut std::ffi::c_void) {
     FRAME_POSTED.store(false, Ordering::SeqCst);
     FRAME_DUE.store(true, Ordering::SeqCst);
+    if let Some(waker) = WAKER.get() {
+        waker.wake();
+    }
+}
+
+/// Wakes the event loop from any thread: something is queued for GPUI's thread (others.rs).
+pub(crate) fn wake() {
     if let Some(waker) = WAKER.get() {
         waker.wake();
     }
@@ -101,6 +110,9 @@ pub(crate) struct AndroidPlatformState {
     text_system: Arc<CosmicTextSystem>,
     gpu_context: GpuContext,
     window: RefCell<Weak<AndroidWindowState>>,
+    /// The windows beyond the activity's own, by id, each on a surface the app hands over.
+    others: RefCell<Vec<(u64, Weak<AndroidWindowState>)>>,
+    next_other: Cell<u64>,
     destroyed: Cell<bool>,
     input_available: Cell<bool>,
     appearance: Cell<WindowAppearance>,
@@ -137,6 +149,8 @@ impl AndroidPlatform {
             text_system,
             gpu_context: GpuContext::default(),
             window: RefCell::new(Weak::new()),
+            others: RefCell::new(Vec::new()),
+            next_other: Cell::new(1),
             destroyed: Cell::new(false),
             input_available: Cell::new(false),
             appearance: Cell::new(appearance),
@@ -153,6 +167,63 @@ impl AndroidPlatform {
 impl AndroidPlatformState {
     fn window(&self) -> Option<Rc<AndroidWindowState>> {
         self.window.borrow().upgrade()
+    }
+
+    /// Every window: the activity's own first, then the others still open.
+    fn windows(&self) -> Vec<Rc<AndroidWindowState>> {
+        let mut others = self.others.borrow_mut();
+        others.retain(|(_, w)| w.strong_count() > 0);
+        self.window().into_iter().chain(others.iter().filter_map(|(_, w)| w.upgrade())).collect()
+    }
+
+    fn other(&self, id: u64) -> Option<Rc<AndroidWindowState>> {
+        self.others.borrow().iter().find(|(i, _)| *i == id).and_then(|(_, w)| w.upgrade())
+    }
+
+    /// What an app's activity told of a window beyond the activity's own (others.rs).
+    fn told(&self, told: Told) {
+        let scale = scale_of(&self.app);
+        match told {
+            Told::Surface(id, native) => {
+                if let Some(window) = self.other(id)
+                    && let Err(e) = window.attach(native)
+                {
+                    log::error!("gpui_android: could not draw on window {id}'s surface: {e:#}");
+                }
+            }
+            Told::Gone(id, done) => {
+                if let Some(window) = self.other(id) {
+                    window.detach();
+                }
+                let _ = done.send(());
+            }
+            Told::Resized(id) => {
+                if let Some(window) = self.other(id) {
+                    window.surface_resized();
+                }
+            }
+            Told::Touch { id, pointer, phase, x, y, pressure } => {
+                if let Some(window) = self.other(id) {
+                    input::touch(&window, pointer, phase, x, y, pressure, scale);
+                }
+            }
+            Told::Insets(id, safe, ime) => {
+                if let Some(window) = self.other(id) {
+                    window.set_insets(others::as_insets(safe, ime, scale));
+                }
+            }
+            Told::Focus(id, focused) => {
+                if let Some(window) = self.other(id) {
+                    window.set_active(focused);
+                }
+            }
+            Told::Ended(id) => {
+                if let Some(window) = self.other(id) {
+                    window.detach();
+                    window.end();
+                }
+            }
+        }
     }
 
     fn read_insets(&self, window: &AndroidWindowState) {
@@ -232,7 +303,7 @@ impl AndroidPlatformState {
             MainEvent::InputAvailable => self.input_available.set(true),
             MainEvent::Destroy => {
                 self.quit_callback.with(|callback| callback());
-                if let Some(window) = self.window() {
+                for window in self.windows() {
                     window.close();
                 }
                 self.destroyed.set(true);
@@ -280,14 +351,17 @@ impl Platform for AndroidPlatform {
             } else if state.input_available.get() {
                 state.input_available.set(false);
             }
-            dispatcher::drain(&mut state.main_queue.borrow_mut());
-            let window = state.window();
-            if FRAME_DUE.swap(false, Ordering::SeqCst)
-                && let Some(window) = window.as_ref()
-            {
-                window.request_frame();
+            for told in others::drain() {
+                state.told(told);
             }
-            if window.as_ref().is_some_and(|w| w.has_surface()) {
+            dispatcher::drain(&mut state.main_queue.borrow_mut());
+            let windows = state.windows();
+            if FRAME_DUE.swap(false, Ordering::SeqCst) {
+                for window in &windows {
+                    window.request_frame();
+                }
+            }
+            if windows.iter().any(|w| w.has_surface()) {
                 post_frame();
             }
         }
@@ -337,10 +411,17 @@ impl Platform for AndroidPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
+        // The activity's own surface is the first window; each after it is the app's to show
+        // (others.rs), on a surface it hands over.
         if self.0.window().is_some() {
-            anyhow::bail!("gpui_android: the activity has one window, and it is open");
+            let id = self.0.next_other.get();
+            self.0.next_other.set(id + 1);
+            let window = AndroidWindow::new(handle, options, self.0.app.clone(), self.0.gpu_context.clone(), Some(id))?;
+            self.0.others.borrow_mut().push((id, Rc::downgrade(&window.0)));
+            others::opened(id);
+            return Ok(Box::new(window));
         }
-        let window = AndroidWindow::new(handle, options, self.0.app.clone(), self.0.gpu_context.clone())?;
+        let window = AndroidWindow::new(handle, options, self.0.app.clone(), self.0.gpu_context.clone(), None)?;
         self.0.window.replace(Rc::downgrade(&window.0));
         Ok(Box::new(window))
     }

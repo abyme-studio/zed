@@ -10,3 +10,6 @@ pub mod android;
 
 #[cfg(target_os = "android")]
 pub use android::{AndroidPlatform, current_platform, set_android_app};
+/// Windows beyond the activity's own, each on a surface the app hands over.
+#[cfg(target_os = "android")]
+pub use android::others as windows;
