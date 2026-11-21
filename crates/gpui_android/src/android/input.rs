@@ -49,7 +49,7 @@ fn position(x: f32, y: f32, scale: f32) -> Point<gpui::Pixels> {
     Point { x: px(x / scale), y: px(y / scale) }
 }
 
-fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, scale: f32) {
+pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, scale: f32) {
     let event = TouchEvent {
         id: TouchId(id as u64),
         phase,
