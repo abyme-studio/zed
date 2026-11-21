@@ -305,6 +305,7 @@ impl WgpuRenderer {
 
     /// As `new`, drawing from `atlas` when given: one made before the window had a surface, which
     /// GPUI already holds (`WgpuAtlas::from_context` on the same context).
+    #[cfg(not(target_family = "wasm"))]
     pub fn new_with_atlas<W>(
         gpu_context: GpuContext,
         window: &W,
