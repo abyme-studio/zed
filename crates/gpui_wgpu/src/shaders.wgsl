@@ -251,12 +251,21 @@ fn linear_to_srgba(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(linear_to_srgb(color.rgb), color.a);
 }
 
+/// A gradient's Oklab stops decode and encode by a 2.2 power, as Metal's shader does.
+fn gamma_to_linear(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(max(color.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)), color.a);
+}
+
+fn linear_to_gamma(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(max(color.rgb, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)), color.a);
+}
+
 /// Convert a sRGBA color to linear space.
 fn srgba_to_linear(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(color.rgb), color.a);
 }
 
-/// Hsla to linear RGBA conversion.
+/// Hsla to non-linear sRGB RGBA conversion.
 fn hsla_to_rgba(hsla: Hsla) -> vec4<f32> {
     let h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
     let s = hsla.s;
@@ -404,16 +413,13 @@ fn prepare_background(background: Background) -> PreparedBackground {
     result.color1 = vec4<f32>(0.0);
 
     if (background.tag == 1u) {
-        // `hsla_to_rgba` returns linear sRGB. Converting the endpoints to the
-        // interpolation space once avoids converting at every stop evaluation.
+        // hsla_to_rgba answers non-linear sRGB, which the Unorm target takes as it is, as
+        // Metal's shader does: an sRGB gradient mixes these, an Oklab one decodes them first.
         result.color0 = hsla_to_rgba(background.colors[0].color);
         result.color1 = hsla_to_rgba(background.colors[1].color);
-        if (background.color_space == 0u) {
-            result.color0 = linear_to_srgba(result.color0);
-            result.color1 = linear_to_srgba(result.color1);
-        } else if (background.color_space == 1u) {
-            result.color0 = linear_srgb_to_oklab(result.color0);
-            result.color1 = linear_srgb_to_oklab(result.color1);
+        if (background.color_space == 1u) {
+            result.color0 = linear_srgb_to_oklab(gamma_to_linear(result.color0));
+            result.color1 = linear_srgb_to_oklab(gamma_to_linear(result.color1));
         }
     } else {
         result.color0 = hsla_to_rgba(background.solid);
@@ -475,9 +481,7 @@ fn background_color(prepared: PreparedBackground, background: Background, bounds
             let t = saturate(dot(position - center, gradient.xy) + gradient.z);
             color = mix(prepared.color0, prepared.color1, t);
             if (background.color_space == 1u) {
-                color = oklab_to_linear_srgb(color);
-            } else {
-                color = srgba_to_linear(color);
+                color = linear_to_gamma(oklab_to_linear_srgb(color));
             }
 
             // Dither to reduce banding in gradients (especially dark/alpha).
