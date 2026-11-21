@@ -55,6 +55,35 @@ use crate::open_type::apply_features_and_fallbacks;
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
 
+/// The `wght` axis's tag, as CoreText's variation identifiers are: its four bytes as a number.
+const WGHT: u32 = u32::from_be_bytes(*b"wght");
+
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    fn CTFontCreateCopyWithAttributes(
+        font: core_text::font::CTFontRef,
+        size: CGFloat,
+        matrix: *const core_graphics::geometry::CGAffineTransform,
+        attributes: core_text::font_descriptor::CTFontDescriptorRef,
+    ) -> core_text::font::CTFontRef;
+}
+
+/// A face's `wght` axis, its least and greatest weight; `None` for a face that has none.
+fn wght_axis(font: &CTFont) -> Option<(f32, f32)> {
+    use core_foundation::{base::CFType, dictionary::CFDictionary, number::CFNumber};
+    let axes = font.get_variation_axes()?;
+    let key = |k: &str| CFString::new(k);
+    let num = |d: &CFDictionary<CFString, CFType>, k: &str| {
+        d.find(key(k)).and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_f64())
+    };
+    axes.iter().find_map(|axis| {
+        let id = num(&axis, "NSCTVariationAxisIdentifier")?;
+        (id as u32 == WGHT).then(|| {
+            Some((num(&axis, "NSCTVariationAxisMinimumValue")? as f32, num(&axis, "NSCTVariationAxisMaximumValue")? as f32))
+        })?
+    })
+}
+
 /// Apple text system using CoreText for font shaping.
 pub struct AppleTextSystem(RwLock<AppleTextSystemState>);
 
@@ -73,6 +102,9 @@ struct AppleTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    /// A variable face drawn at another weight than its own, by its own `FontId` and the weight's
+    /// bits: a `FontId` of its own, a copy of the face at that point of its `wght` axis.
+    weighted_font_ids: HashMap<(FontId, u32), FontId>,
 }
 
 impl AppleTextSystem {
@@ -86,6 +118,7 @@ impl AppleTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            weighted_font_ids: HashMap::default(),
         }))
     }
 }
@@ -173,6 +206,7 @@ impl PlatformTextSystem for AppleTextSystem {
             )?;
 
             let font_id = candidates[ix];
+            let font_id = lock.at_weight(font_id, font.weight.0);
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -379,6 +413,58 @@ impl AppleTextSystemState {
 
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId> {
         self.fonts[font_id.0].glyph_for_char(ch).map(GlyphId)
+    }
+
+    /// `font_id` drawn at `weight`: itself, unless it is a variable face with a `wght` axis whose own
+    /// weight is another, when it is a `FontId` of its own, a copy at that weight, made once. A
+    /// family of one variable file (one added from memory, which font-kit holds as one face) then
+    /// draws every weight it has, as CSS's `font-weight` does.
+    fn at_weight(&mut self, font_id: FontId, weight: f32) -> FontId {
+        if let Some(&id) = self.weighted_font_ids.get(&(font_id, weight.to_bits())) {
+            return id;
+        }
+        let native = self.fonts[font_id.0].native_font();
+        let own = unsafe { lenient_traits::properties(&native) }.map(|p| p.weight.0);
+        if own.is_none_or(|w| (w - weight).abs() < 1.0) {
+            return font_id;
+        }
+        let Some((min, max)) = wght_axis(&native) else {
+            return font_id;
+        };
+        let at = weight.clamp(min, max);
+        let copy = unsafe {
+            let tag = core_foundation::number::CFNumber::from(WGHT as i64);
+            let desc = core_text::font_descriptor::CTFontDescriptorCreateCopyWithVariation(
+                native.copy_descriptor().as_concrete_TypeRef(),
+                tag.as_concrete_TypeRef(),
+                at as CGFloat,
+            );
+            if desc.is_null() {
+                return font_id;
+            }
+            let desc = CTFontDescriptor::wrap_under_create_rule(desc);
+            let font = CTFontCreateCopyWithAttributes(
+                native.as_concrete_TypeRef(),
+                native.pt_size() as CGFloat,
+                std::ptr::null(),
+                desc.as_concrete_TypeRef(),
+            );
+            if font.is_null() {
+                return font_id;
+            }
+            CTFont::wrap_under_create_rule(font)
+        };
+        let id = FontId(self.fonts.len());
+        let postscript_name = copy.postscript_name();
+        // A shaped run in this copy maps back to it, unless CoreText names it as the face it copies.
+        self.font_ids_by_postscript_name
+            .entry(postscript_name.clone())
+            .or_insert(id);
+        self.postscript_names_by_font_id.insert(id, postscript_name);
+        self.fonts
+            .push(unsafe { FontKitFont::from_core_text_font_no_path(copy) });
+        self.weighted_font_ids.insert((font_id, weight.to_bits()), id);
+        id
     }
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
