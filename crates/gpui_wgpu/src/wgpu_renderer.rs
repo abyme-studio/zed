@@ -2246,9 +2246,16 @@ impl WgpuRenderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface_config.alpha_mode = alpha_mode;
-        if let Some(mode) = config.preferred_present_mode {
-            self.surface_config.present_mode = mode;
-        }
+        // The new surface may offer fewer present modes than the first one did (an Android
+        // emulator's offers only Fifo): the preferred mode only where it has it, as at creation.
+        let offered = self
+            .context
+            .as_ref()
+            .and_then(|c| c.borrow().as_ref().map(|ctx| surface.get_capabilities(&ctx.adapter).present_modes));
+        self.surface_config.present_mode = config
+            .preferred_present_mode
+            .filter(|mode| offered.as_ref().is_some_and(|modes| modes.contains(mode)))
+            .unwrap_or(wgpu::PresentMode::Fifo);
 
         let mut core = match std::mem::replace(&mut self.state, RendererState::Released) {
             RendererState::Ready {
