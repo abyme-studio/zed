@@ -237,6 +237,21 @@ impl AndroidPlatformState {
                     window.end();
                 }
             }
+            Told::Key { id, code, meta, down, repeat, typed, bare } => {
+                if let Some(window) = self.other(id) {
+                    input::told_key(&window, code, meta, down, repeat, typed, bare);
+                }
+            }
+            Told::Text(id, state) => {
+                if let Some(window) = self.other(id) {
+                    window.text_input.apply(&state, &window.input_handler);
+                }
+            }
+            Told::Action(id) => {
+                if let Some(window) = self.other(id) {
+                    input::action(&window);
+                }
+            }
         }
     }
 

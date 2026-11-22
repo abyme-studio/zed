@@ -7,12 +7,15 @@
 //! insets, its focus and its end. Each is queued here and handled on GPUI's thread at its next wake.
 //! A surface going away waits until GPUI has let go of it, as `TerminateWindow` does.
 //!
-//! Such a window has touches alone: no keyboard text, no TalkBack tree, both the activity's own.
+//! Its keys and the IME's text come the same way (`key`, `text`, `action`), and GPUI says what its
+//! keyboard should show back to the app's view for it (`on_keyboard`), as GameTextInput is told for
+//! the activity's own. It has no TalkBack tree yet: that is the activity's own.
 
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use android_activity::input::{TextInputState, TextSpan};
 use gpui::{Edges, TouchPhase, WindowInsets, px};
 pub use ndk::native_window::NativeWindow;
 
@@ -29,11 +32,31 @@ pub(crate) enum Told {
     Placed(u64, i32, i32),
     /// The activity ended (Back, or closed by the operator): GPUI closes the window.
     Ended(u64),
+    /// A key, as Android's `KeyEvent` gives it: its code, meta state, whether down, its repeat
+    /// count, and the character it types with its meta state and without (0 for none).
+    Key { id: u64, code: u32, meta: u32, down: bool, repeat: i32, typed: u32, bare: u32 },
+    /// The IME changed the text the app's view holds for the focused input.
+    Text(u64, TextInputState),
+    /// The keyboard's action key.
+    Action(u64),
+}
+
+/// What GPUI tells the app's view for a window of what its keyboard should show.
+pub enum Keyboard {
+    /// An input took focus: the keyboard comes up.
+    Show,
+    /// No input has focus: the keyboard goes.
+    Hide,
+    /// The focused input's kind: `EditorInfo.inputType` and the action's `imeOptions`.
+    Editor { input_type: u32, action: u32 },
+    /// The focused input's text around the caret, its selection and composing region (UTF-16).
+    State(TextInputState),
 }
 
 static TOLD: Mutex<Vec<Told>> = Mutex::new(Vec::new());
 static OPENED: OnceLock<Box<dyn Fn(u64) + Send + Sync>> = OnceLock::new();
 static CLOSED: OnceLock<Box<dyn Fn(u64) + Send + Sync>> = OnceLock::new();
+static KEYBOARD: OnceLock<Box<dyn Fn(u64, Keyboard) + Send + Sync>> = OnceLock::new();
 
 /// How long a surface going away waits for GPUI's thread to let go of it.
 const LET_GO: Duration = Duration::from_secs(2);
@@ -57,6 +80,18 @@ pub fn on_opened(opened: impl Fn(u64) + Send + Sync + 'static) {
 /// finishes its activity, if it still runs.
 pub fn on_closed(closed: impl Fn(u64) + Send + Sync + 'static) {
     let _ = CLOSED.set(Box::new(closed));
+}
+
+/// Called on GPUI's thread with what window `id`'s keyboard should show: the app's view for it
+/// holds the text the IME edits, and shows or hides the keyboard.
+pub fn on_keyboard(keyboard: impl Fn(u64, Keyboard) + Send + Sync + 'static) {
+    let _ = KEYBOARD.set(Box::new(keyboard));
+}
+
+pub(crate) fn keyboard(id: u64, said: Keyboard) {
+    if let Some(keyboard) = KEYBOARD.get() {
+        keyboard(id, said);
+    }
 }
 
 pub(crate) fn opened(id: u64) {
@@ -116,6 +151,24 @@ pub fn focus(id: u64, focused: bool) {
 /// Window `id`'s activity ended: GPUI closes the window.
 pub fn ended(id: u64) {
     tell(Told::Ended(id));
+}
+
+/// A key on window `id`'s view (`dispatchKeyEvent`): `code`, `meta`, `repeat` as Android's
+/// `KeyEvent` has them; `typed` and `bare`, `getUnicodeChar` with its meta state and with none.
+pub fn key(id: u64, code: u32, meta: u32, down: bool, repeat: i32, typed: u32, bare: u32) {
+    tell(Told::Key { id, code, meta, down, repeat, typed, bare });
+}
+
+/// The IME's text for window `id`'s focused input, after its edit: the whole text the view holds,
+/// its selection, and its composing region if any (UTF-16 offsets).
+pub fn text(id: u64, text: String, selection: (usize, usize), compose: Option<(usize, usize)>) {
+    let span = |(start, end): (usize, usize)| TextSpan { start, end };
+    tell(Told::Text(id, TextInputState { text, selection: span(selection), compose_region: compose.map(span) }));
+}
+
+/// The keyboard's action key on window `id` (Done, Go, Send, or a new line).
+pub fn action(id: u64) {
+    tell(Told::Action(id));
 }
 
 /// Device pixels as GPUI's insets at `scale`.

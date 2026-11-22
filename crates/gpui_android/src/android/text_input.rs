@@ -1,4 +1,5 @@
-//! The soft keyboard and IMEs, through GameActivity's own `InputConnection` (GameTextInput).
+//! The soft keyboard and IMEs, through GameActivity's own `InputConnection` (GameTextInput), or,
+//! for a window beyond the activity's own, through the app's view for it (`others::on_keyboard`).
 //!
 //! GameTextInput keeps an editable copy of the text: its text, selection and composing region.
 //! We fill it from the focused input's text around the caret, and when the IME changes it, apply
@@ -29,6 +30,57 @@ struct Mirror {
     compose: Option<Range<usize>>,
 }
 
+/// Where the keyboard is: the activity's own, or the app's view for window `id` (others.rs).
+#[derive(Clone, Copy)]
+pub(crate) enum Keyboard<'a> {
+    Activity(&'a AndroidApp),
+    Other(u64),
+}
+
+impl Keyboard<'_> {
+    fn show(self) {
+        match self {
+            Keyboard::Activity(app) => app.show_soft_input(false),
+            Keyboard::Other(id) => super::others::keyboard(id, super::others::Keyboard::Show),
+        }
+    }
+
+    fn hide(self) {
+        match self {
+            Keyboard::Activity(app) => app.hide_soft_input(false),
+            Keyboard::Other(id) => super::others::keyboard(id, super::others::Keyboard::Hide),
+        }
+    }
+
+    fn editor(self, input_type: InputType, action: android_activity::input::TextInputAction) {
+        match self {
+            Keyboard::Activity(app) => app.set_ime_editor_info(input_type, action, ImeOptions::IME_FLAG_NO_FULLSCREEN),
+            Keyboard::Other(id) => {
+                use android_activity::input::TextInputAction as Ime;
+                // `EditorInfo.IME_ACTION_*`.
+                let action = match action {
+                    Ime::None => 1,
+                    Ime::Go => 2,
+                    Ime::Search => 3,
+                    Ime::Send => 4,
+                    Ime::Next => 5,
+                    Ime::Done => 6,
+                    Ime::Previous => 7,
+                    _ => 0,
+                };
+                super::others::keyboard(id, super::others::Keyboard::Editor { input_type: input_type.bits(), action })
+            }
+        }
+    }
+
+    fn state(self, state: TextInputState) {
+        match self {
+            Keyboard::Activity(app) => app.set_text_input_state(state),
+            Keyboard::Other(id) => super::others::keyboard(id, super::others::Keyboard::State(state)),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TextInput {
     mirror: RefCell<Option<Mirror>>,
@@ -40,29 +92,29 @@ pub(crate) struct TextInput {
 impl TextInput {
     pub(crate) fn state_changed(
         &self,
-        app: &AndroidApp,
+        keyboard: Keyboard<'_>,
         handlers: &CallbackSlot<PlatformInputHandler>,
         change: TextInputStateChange,
     ) {
         match change {
             TextInputStateChange::FocusGained => {
                 self.mirror.replace(None);
-                self.push(app, handlers);
-                app.show_soft_input(false);
+                self.push(keyboard, handlers);
+                keyboard.show();
             }
             TextInputStateChange::FocusLost => {
                 self.mirror.replace(None);
-                app.hide_soft_input(false);
+                keyboard.hide();
             }
             TextInputStateChange::SelectionChanged | TextInputStateChange::ContentChanged => {
                 if !self.native_edit.get() {
-                    self.push(app, handlers);
+                    self.push(keyboard, handlers);
                 }
             }
         }
     }
 
-    pub(crate) fn set_configuration(&self, app: &AndroidApp, configuration: TextInputConfiguration) {
+    pub(crate) fn set_configuration(&self, keyboard: Keyboard<'_>, configuration: TextInputConfiguration) {
         if *self.configuration.borrow() == configuration {
             return;
         }
@@ -93,18 +145,18 @@ impl TextInput {
             TextInputAction::Search => Ime::Search,
             TextInputAction::Send => Ime::Send,
         };
-        app.set_ime_editor_info(input_type, action, ImeOptions::IME_FLAG_NO_FULLSCREEN);
+        keyboard.editor(input_type, action);
         self.configuration.replace(configuration);
     }
 
     /// Sets GameTextInput from the focused input, unless it already holds the same.
-    fn push(&self, app: &AndroidApp, handlers: &CallbackSlot<PlatformInputHandler>) {
+    fn push(&self, keyboard: Keyboard<'_>, handlers: &CallbackSlot<PlatformInputHandler>) {
         let read = handlers.with(read_mirror).flatten();
         let Some(mirror) = read else { return };
         if self.mirror.borrow().as_ref() == Some(&mirror) {
             return;
         }
-        app.set_text_input_state(TextInputState {
+        keyboard.state(TextInputState {
             text: String::from_utf16_lossy(&mirror.text),
             selection: TextSpan { start: mirror.selection.start, end: mirror.selection.end },
             compose_region: mirror.compose.clone().map(|c| TextSpan { start: c.start, end: c.end }),
