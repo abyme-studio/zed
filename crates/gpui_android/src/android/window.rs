@@ -15,7 +15,7 @@ use gpui::{
     Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
-    WindowParams, WindowVisibility, px, size,
+    WindowParams, WindowVisibility, point, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuAtlas, WgpuRenderer, WgpuSurfaceConfig};
 use ndk::native_window::NativeWindow;
@@ -64,6 +64,8 @@ pub(crate) struct AndroidWindowState {
     native: RefCell<Option<RawWindow>>,
     /// The surface's size in device pixels.
     device_size: Cell<Size<DevicePixels>>,
+    /// The surface's top left on the screen, in device pixels, as the app tells it (others.rs `placed`).
+    device_origin: Cell<Point<DevicePixels>>,
     scale: Cell<f32>,
     visibility: Cell<WindowVisibility>,
     active: Cell<bool>,
@@ -175,6 +177,19 @@ impl AndroidWindowState {
         self.notify_resize();
     }
 
+    /// The surface's top left moved on the screen (the app's `placed`): GPUI hears it as a move.
+    pub(crate) fn set_origin(&self, origin: Point<DevicePixels>) {
+        if self.device_origin.replace(origin) != origin {
+            self.moved_callback.with(|callback| callback());
+        }
+    }
+
+    fn logical_origin(&self) -> Point<Pixels> {
+        let o = self.device_origin.get();
+        let scale = self.scale.get();
+        point(px(o.x.0 as f32 / scale), px(o.y.0 as f32 / scale))
+    }
+
     fn notify_resize(&self) {
         let (logical, scale) = (self.logical_size(), self.scale.get());
         self.resize_callback.with(|callback| callback(logical, scale));
@@ -273,6 +288,7 @@ impl AndroidWindow {
             atlas,
             native: RefCell::new(None),
             device_size: Cell::new(size(DevicePixels(1), DevicePixels(1))),
+            device_origin: Cell::new(Point::default()),
             visibility: Cell::new(WindowVisibility::Hidden),
             active: Cell::new(false),
             mouse_position: Cell::new(Point::default()),
@@ -329,7 +345,7 @@ impl HasDisplayHandle for AndroidWindow {
 
 impl PlatformWindow for AndroidWindow {
     fn bounds(&self) -> Bounds<Pixels> {
-        Bounds::new(Point::default(), self.0.logical_size())
+        Bounds::new(self.0.logical_origin(), self.0.logical_size())
     }
 
     fn is_maximized(&self) -> bool {

@@ -25,6 +25,8 @@ pub(crate) enum Told {
     /// The bars and cutout, then the keyboard, in device pixels: left, top, right, bottom.
     Insets(u64, [i32; 4], [i32; 4]),
     Focus(u64, bool),
+    /// The surface's top left on the screen, in device pixels.
+    Placed(u64, i32, i32),
     /// The activity ended (Back, or closed by the operator): GPUI closes the window.
     Ended(u64),
 }
@@ -98,6 +100,12 @@ pub fn touch(id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure:
 /// and the keyboard.
 pub fn insets(id: u64, safe: [i32; 4], ime: [i32; 4]) {
     tell(Told::Insets(id, safe, ime));
+}
+
+/// Window `id`'s surface has its top left at (x, y) on the screen, in device pixels
+/// (`View.getLocationOnScreen`): GPUI's `bounds` start there. Id 0 is the activity's own window.
+pub fn placed(id: u64, x: i32, y: i32) {
+    tell(Told::Placed(id, x, y));
 }
 
 /// Window `id`'s activity gained or lost focus.
