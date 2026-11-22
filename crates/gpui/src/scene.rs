@@ -1304,7 +1304,10 @@ mod tests {
     fn quad(x: f32) -> Quad {
         Quad {
             bounds: square(x),
-            content_mask: ContentMask { bounds: square(x) },
+            content_mask: ContentMask {
+                bounds: square(x),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -1314,7 +1317,10 @@ mod tests {
             order: 0,
             pad: 0,
             bounds: square(x),
-            content_mask: ContentMask { bounds: square(x) },
+            content_mask: ContentMask {
+                bounds: square(x),
+                ..Default::default()
+            },
             color: Hsla::default(),
             thickness: ScaledPixels(1.),
             wavy: false.into(),
@@ -1336,7 +1342,10 @@ mod tests {
             id: NativeViewId::for_test(1),
             hitbox_id: HitboxId::placeholder(),
             bounds: square(0.),
-            content_mask: ContentMask { bounds: square(0.) },
+            content_mask: ContentMask {
+                bounds: square(0.),
+                ..Default::default()
+            },
             background: Hsla::default(),
         });
         scene.insert_primitive(quad(0.));
