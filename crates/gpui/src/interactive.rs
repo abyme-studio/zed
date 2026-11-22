@@ -108,6 +108,38 @@ pub enum TouchPhase {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TouchId(pub u64);
 
+/// What a pointer is: a mouse or trackpad, a pen or stylus, or a finger.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PointerKind {
+    /// A mouse or trackpad.
+    #[default]
+    Mouse,
+    /// A pen or stylus, such as Apple Pencil.
+    Pen,
+    /// A finger on a touch screen.
+    Touch,
+}
+
+/// The pointer behind the last pointer input the platform saw, as it reports
+/// it: what the event types themselves do not carry. Read it with
+/// [`Window::pointer`](crate::Window::pointer) while handling a mouse, touch or
+/// gesture event; it stays until the next pointer input.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointerInfo {
+    /// What the pointer is.
+    pub kind: PointerKind,
+    /// The platform's id for the pointer, stable from its press to its
+    /// release; 0 for the mouse where the platform gives none.
+    pub id: u64,
+    /// The contact's width and height in logical pixels; 0 when the platform
+    /// does not report it.
+    pub width: f32,
+    /// See [`Self::width`].
+    pub height: f32,
+    /// Normalized pressure in `0.0..=1.0`, if the hardware reports it.
+    pub pressure: Option<f32>,
+}
+
 /// A raw touch event from the platform.
 ///
 ///

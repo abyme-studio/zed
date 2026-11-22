@@ -204,7 +204,7 @@ impl AndroidPlatformState {
             }
             Told::Touch { id, pointer, phase, x, y, pressure } => {
                 if let Some(window) = self.other(id) {
-                    input::touch(&window, pointer, phase, x, y, pressure, scale);
+                    input::touch(&window, pointer, phase, x, y, pressure, scale, input::Contact::FINGER);
                 }
             }
             Told::Insets(id, safe, ime) => {

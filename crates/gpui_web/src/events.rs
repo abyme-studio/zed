@@ -238,6 +238,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointerdown", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.state.borrow_mut().pointer = Some(pointer_info(&event));
             event.prevent_default();
 
             let pointer_type = event.pointer_type();
@@ -329,6 +330,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointerup", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.state.borrow_mut().pointer = Some(pointer_info(&event));
             event.prevent_default();
 
             let position = pointer_position_in_element(&event);
@@ -458,6 +460,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointercancel", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.state.borrow_mut().pointer = Some(pointer_info(&event));
             if event.pointer_type() == "touch" {
                 let Some(touch_id) = this.touch_ids.borrow_mut().end(event.pointer_id()) else {
                     return;
@@ -574,6 +577,7 @@ impl WebWindowInner {
         let this = Rc::clone(self);
         self.listen("pointermove", move |event: JsValue| {
             let event: web_sys::PointerEvent = event.unchecked_into();
+            this.state.borrow_mut().pointer = Some(pointer_info(&event));
             event.prevent_default();
 
             let position = pointer_position_in_element(&event);
@@ -1425,6 +1429,24 @@ fn compute_key_char(
     }
 
     None
+}
+
+/// The browser's pointer as GPUI reports it: its type, id, contact size and pressure.
+fn pointer_info(event: &web_sys::PointerEvent) -> gpui::PointerInfo {
+    let kind = match event.pointer_type().as_str() {
+        "pen" => gpui::PointerKind::Pen,
+        "touch" => gpui::PointerKind::Touch,
+        _ => gpui::PointerKind::Mouse,
+    };
+    // A mouse with no pressure sensor reports 0.5 while pressed and 0 otherwise: no reading.
+    let pressure = (kind != gpui::PointerKind::Mouse).then(|| event.pressure().clamp(0.0, 1.0));
+    gpui::PointerInfo {
+        kind,
+        id: event.pointer_id().max(0) as u64,
+        width: event.width() as f32,
+        height: event.height() as f32,
+        pressure,
+    }
 }
 
 fn pointer_position_in_element(event: &web_sys::PointerEvent) -> Point<Pixels> {

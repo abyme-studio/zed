@@ -68,6 +68,8 @@ pub(crate) struct AndroidWindowState {
     visibility: Cell<WindowVisibility>,
     active: Cell<bool>,
     pub(crate) mouse_position: Cell<Point<Pixels>>,
+    /// The last touch's pointer (`PlatformWindow::pointer`).
+    pub(crate) pointer: Cell<Option<gpui::PointerInfo>>,
     pub(crate) modifiers: Cell<Modifiers>,
     insets: RefCell<WindowInsets>,
     force_next_frame: Cell<bool>,
@@ -276,6 +278,7 @@ impl AndroidWindow {
             visibility: Cell::new(WindowVisibility::Hidden),
             active: Cell::new(false),
             mouse_position: Cell::new(Point::default()),
+            pointer: Cell::new(None),
             modifiers: Cell::new(Modifiers::default()),
             insets: RefCell::new(WindowInsets::default()),
             force_next_frame: Cell::new(true),
@@ -363,6 +366,10 @@ impl PlatformWindow for AndroidWindow {
 
     fn mouse_position(&self) -> Point<Pixels> {
         self.0.mouse_position.get()
+    }
+
+    fn pointer(&self) -> Option<gpui::PointerInfo> {
+        self.0.pointer.get()
     }
 
     fn modifiers(&self) -> Modifiers {
