@@ -394,6 +394,14 @@ impl CosmicTextSystemState {
 
         let cosmic_features = cosmic_font_features(features)?;
 
+        // A family none of whose faces has an 'm' (a symbols font a page names) is still a
+        // family: its faces load, as the only answer, rather than none.
+        let has_m = families.iter().any(|(database_id, _)| {
+            self.font_system
+                .get_font(*database_id, cosmic_text::Weight::NORMAL)
+                .is_some_and(|font| font.as_swash().charmap().map('m') != 0)
+        });
+
         let mut loaded_font_ids = SmallVec::new();
         for (database_id, postscript_name) in families {
             let key = LoadedFontKey {
@@ -425,7 +433,8 @@ impl CosmicTextSystemState {
             // and emoji fonts often have no Latin glyphs, and they are exactly
             // what cosmic-text falls back to when the primary font lacks a
             // glyph.
-            if font.as_swash().charmap().map('m') == 0
+            if has_m
+                && font.as_swash().charmap().map('m') == 0
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
             {
                 continue;
