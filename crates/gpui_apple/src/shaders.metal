@@ -1399,3 +1399,88 @@ bool has_border(Edges_ScaledPixels border_widths) {
 bool is_shaped(Quad quad) {
   return has_rounded_corners(quad.corner_radii) || has_border(quad.border_widths);
 }
+
+// A backdrop blur's passes (BackdropBlur): the region under the box, copied out
+// of the target, blurred by dual Kawase, two passes down to a quarter and one up
+// to a half, and the last pass up drawn back into the target inside the box's
+// corners and clip.
+struct BlurParams {
+  // The region copied out: its top left in the target, and its size, device px.
+  float4 region;
+  float4 bounds;
+  float4 mask;
+  // top left, top right, bottom right, bottom left
+  float4 radii;
+  // How many full-size px a texel of the source and of the destination is; the
+  // sample offset in source texels.
+  float src_div;
+  float dst_div;
+  float offset;
+  float pad;
+};
+
+constexpr sampler blur_sampler(filter::linear, address::clamp_to_edge);
+
+vertex float4 blur_vertex(uint vertex_id [[vertex_id]]) {
+  float2 xy = float2(float((vertex_id << 1) & 2), float(vertex_id & 2));
+  return float4(xy.x * 2.0 - 1.0, 1.0 - xy.y * 2.0, 0.0, 1.0);
+}
+
+// A destination pixel's place in the source texture, both regions starting at
+// texel 0.
+float2 blur_src_uv(float2 region_px, constant BlurParams &p, texture2d<float> src) {
+  return region_px / p.src_div / float2(src.get_width(), src.get_height());
+}
+
+float4 blur_down(float2 uv, constant BlurParams &p, texture2d<float> src) {
+  float2 h = p.offset / float2(src.get_width(), src.get_height());
+  float4 c = src.sample(blur_sampler, uv) * 4.0;
+  c += src.sample(blur_sampler, uv - h);
+  c += src.sample(blur_sampler, uv + h);
+  c += src.sample(blur_sampler, uv + float2(h.x, -h.y));
+  c += src.sample(blur_sampler, uv - float2(h.x, -h.y));
+  return c / 8.0;
+}
+
+float4 blur_up(float2 uv, constant BlurParams &p, texture2d<float> src) {
+  float2 h = p.offset / float2(src.get_width(), src.get_height());
+  float4 c = src.sample(blur_sampler, uv + float2(-h.x * 2.0, 0.0));
+  c += src.sample(blur_sampler, uv + float2(-h.x, h.y)) * 2.0;
+  c += src.sample(blur_sampler, uv + float2(0.0, h.y * 2.0));
+  c += src.sample(blur_sampler, uv + float2(h.x, h.y)) * 2.0;
+  c += src.sample(blur_sampler, uv + float2(h.x * 2.0, 0.0));
+  c += src.sample(blur_sampler, uv + float2(h.x, -h.y)) * 2.0;
+  c += src.sample(blur_sampler, uv + float2(0.0, -h.y * 2.0));
+  c += src.sample(blur_sampler, uv + float2(-h.x, -h.y)) * 2.0;
+  return c / 12.0;
+}
+
+fragment float4 blur_down_fragment(float4 position [[position]],
+                                   constant BlurParams &p [[buffer(0)]],
+                                   texture2d<float> src [[texture(0)]]) {
+  return blur_down(blur_src_uv(position.xy * p.dst_div, p, src), p, src);
+}
+
+fragment float4 blur_up_fragment(float4 position [[position]],
+                                 constant BlurParams &p [[buffer(0)]],
+                                 texture2d<float> src [[texture(0)]]) {
+  return blur_up(blur_src_uv(position.xy * p.dst_div, p, src), p, src);
+}
+
+// Back into the target: inside the box's rounded corners, antialiased, and its
+// clip. Premultiplied, as the target is.
+fragment float4 blur_back_fragment(float4 position [[position]],
+                                   constant BlurParams &p [[buffer(0)]],
+                                   texture2d<float> src [[texture(0)]]) {
+  float4 c = blur_up(blur_src_uv(position.xy - p.region.xy, p, src), p, src);
+  float2 half_size = p.bounds.zw / 2.0;
+  float2 d = position.xy - (p.bounds.xy + half_size);
+  float r = d.y > 0.0 ? (d.x > 0.0 ? p.radii.z : p.radii.w)
+                      : (d.x > 0.0 ? p.radii.y : p.radii.x);
+  r = min(r, min(half_size.x, half_size.y));
+  float2 q = fabs(d) - half_size + r;
+  float sdf = length(max(q, float2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+  bool inside = all(position.xy >= p.mask.xy) && all(position.xy < p.mask.xy + p.mask.zw);
+  float cover = saturate(0.5 - sdf) * (inside ? 1.0 : 0.0);
+  return c * cover;
+}

@@ -229,6 +229,8 @@ struct WgpuRendererCore {
     ))]
     target_format: wgpu::TextureFormat,
     max_texture_size: u32,
+    /// The backdrop blur's passes, made at the first frame with a blur.
+    backdrop: Option<crate::wgpu_blur::Backdrop>,
 }
 
 /// GPU resources of a windowed renderer. A surface is only ever configured against the
@@ -464,8 +466,11 @@ impl WgpuRenderer {
             );
         }
 
+        // A backdrop blur copies out of the frame: asked for where the surface allows it.
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | (surface_caps.usages & wgpu::TextureUsages::COPY_SRC);
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format: surface_format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: clamped_width.max(1),
@@ -1157,7 +1162,13 @@ impl WgpuRenderer {
         let frame_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        if let Err(error) = core.render_frame(scene, &frame_view, size, wgpu::Color::TRANSPARENT) {
+        if let Err(error) = core.render_frame(
+            scene,
+            &frame.texture,
+            &frame_view,
+            size,
+            wgpu::Color::TRANSPARENT,
+        ) {
             log::error!("{error:#}");
             return false;
         }
@@ -1298,6 +1309,7 @@ impl WgpuRendererCore {
             ))]
             target_format,
             max_texture_size,
+            backdrop: None,
         }
     }
 
@@ -1327,6 +1339,7 @@ impl WgpuRendererCore {
     fn render_frame(
         &mut self,
         scene: &Scene,
+        target: &wgpu::Texture,
         target_view: &wgpu::TextureView,
         size: Size<DevicePixels>,
         clear_color: wgpu::Color,
@@ -1357,7 +1370,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&gamma_params),
         );
 
-        self.record_frame(scene, target_view, size, clear_color)
+        self.record_frame(scene, target, target_view, size, clear_color)
             .inspect_err(|_| {
                 // Queue writes are staged before encoding; flush them even if the frame fails.
                 self.resources.queue.submit(std::iter::empty());
@@ -1367,10 +1380,27 @@ impl WgpuRendererCore {
     fn record_frame(
         &mut self,
         scene: &Scene,
+        target: &wgpu::Texture,
         frame_view: &wgpu::TextureView,
         size: Size<DevicePixels>,
         clear_color: wgpu::Color,
     ) -> Result<wgpu::SubmissionIndex> {
+        // Blurs copy out of the target: none where it cannot be copied from.
+        let blurs = !scene.backdrop_blurs.is_empty()
+            && target.usage().contains(wgpu::TextureUsages::COPY_SRC);
+        if blurs {
+            let device = &self.resources.device;
+            let backdrop = self
+                .backdrop
+                .get_or_insert_with(|| crate::wgpu_blur::Backdrop::new(device, target.format()));
+            backdrop.begin(
+                device,
+                target.format(),
+                scene.backdrop_blurs.len(),
+                target.width(),
+                target.height(),
+            );
+        }
         let mut instance_offset = 0;
         let instance_bindings = self
             .write_instances(scene, &mut instance_offset)
@@ -1402,12 +1432,26 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&globals),
         );
         self.prepare_texture_bind_groups(scene);
-        self.ensure_depth_texture(size);
-        let depth_view = &self
+        // A blur reads what is drawn under it, so a pass ends at each blur and the opaque quads
+        // are drawn in parts, each up to the next blur, with the depth kept between passes.
+        let blur_cuts = if blurs {
+            scene.backdrop_blur_quad_cuts()
+        } else {
+            Vec::new()
+        };
+        let quad_count = scene.quads.len();
+        self.ensure_depth_texture(size, blurs);
+        let depth_view = self
             .depth_texture
             .as_ref()
             .context("depth texture missing")?
-            .view;
+            .view
+            .clone();
+        let depth_store = if blurs {
+            wgpu::StoreOp::Store
+        } else {
+            wgpu::StoreOp::Discard
+        };
         // Quads are written first, so their instance indices are their
         // indices in `scene.quads` on both transports, which the quad depths
         // rely on.
@@ -1433,10 +1477,10 @@ impl WgpuRendererCore {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
+                    view: &depth_view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: depth_store,
                     }),
                     stencil_ops: None,
                 }),
@@ -1444,10 +1488,12 @@ impl WgpuRendererCore {
             });
             pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
 
+            let mut opaque_end = blur_cuts.first().copied().unwrap_or(quad_count);
+            let mut blur_cut = 0;
             self.draw_instances(
                 &instance_bindings.quads,
                 &self.resources().pipelines.opaque_quads,
-                instance_range(0..scene.quads.len()),
+                opaque_instances(0..opaque_end, quad_count),
                 &mut pass,
             );
 
@@ -1545,6 +1591,56 @@ impl WgpuRendererCore {
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                     // Native views are only composited by the Metal renderer.
                     PrimitiveBatch::NativeViews(_) => {}
+                    PrimitiveBatch::BackdropBlurs(range) => {
+                        if !blurs {
+                            continue;
+                        }
+                        drop(pass);
+                        if let Some(backdrop) = self.backdrop.as_mut() {
+                            for blur in &scene.backdrop_blurs[range] {
+                                backdrop.run(
+                                    &self.resources.queue,
+                                    &mut encoder,
+                                    target,
+                                    frame_view,
+                                    blur,
+                                );
+                            }
+                        }
+                        pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("main_pass_continued"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: frame_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            ..Default::default()
+                        });
+                        pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
+                        blur_cut += 1;
+                        let opaque_start = opaque_end;
+                        opaque_end = blur_cuts.get(blur_cut).copied().unwrap_or(quad_count);
+                        self.draw_instances(
+                            &instance_bindings.quads,
+                            &self.resources().pipelines.opaque_quads,
+                            opaque_instances(opaque_start..opaque_end, quad_count),
+                            &mut pass,
+                        );
+                    }
                 }
             }
         }
@@ -1556,16 +1652,24 @@ impl WgpuRendererCore {
         Ok(submission)
     }
 
-    fn ensure_depth_texture(&mut self, size: Size<DevicePixels>) {
+    /// A depth buffer of `size`. One `kept` across passes, as a frame with a backdrop blur needs,
+    /// is never transient.
+    fn ensure_depth_texture(&mut self, size: Size<DevicePixels>, kept: bool) {
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
+        let transient = self.transient_attachments && !kept;
         if let Some(depth_texture) = &self.depth_texture
             && depth_texture.texture.width() == width
             && depth_texture.texture.height() == height
+            && depth_texture
+                .texture
+                .usage()
+                .contains(wgpu::TextureUsages::TRANSIENT_ATTACHMENT)
+                == transient
         {
             return;
         }
-        let usage = if self.transient_attachments {
+        let usage = if transient {
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT
         } else {
             wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -2366,14 +2470,13 @@ impl WgpuHeadlessRenderer {
     fn render(&mut self, scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
         self.check_gpu_errors()?;
         self.ensure_render_target(size)?;
-        let view = self
+        let target = self
             .render_target
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?
-            .view
-            .clone();
+            .ok_or_else(|| anyhow::anyhow!("Headless render target was not created"))?;
+        let (texture, view) = (target.texture.clone(), target.view.clone());
         self.core
-            .render_frame(scene, &view, size, wgpu::Color::BLACK)?;
+            .render_frame(scene, &texture, &view, size, wgpu::Color::BLACK)?;
         Ok(())
     }
 
@@ -2514,6 +2617,12 @@ impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
 
 fn instance_range(range: Range<usize>) -> Range<u32> {
     range.start as u32..range.end as u32
+}
+
+/// The opaque quad shader takes instance `i` as quad `quad_count - 1 - i`, front to back, so
+/// `quads` are drawn by their instances counted from the end.
+fn opaque_instances(quads: Range<usize>, quad_count: usize) -> Range<u32> {
+    instance_range(quad_count - quads.end..quad_count - quads.start)
 }
 
 #[cfg(not(target_family = "wasm"))]
