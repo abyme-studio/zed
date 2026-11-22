@@ -1,7 +1,9 @@
 //! GPUI's browser platform uses one document-owned canvas and supports one top-level window.
 //! Browser WebGPU is preferred by default, with an automatic WebGL2 fallback. Applications can
 //! force either backend with `WebBackendPreference`. Opening a second top-level window, or
-//! reopening one after it closes, returns `WebWindowError`.
+//! reopening one after it closes, returns `WebWindowError`. A window opened with a background
+//! other than opaque draws its canvas clear where nothing paints, and `window_canvas` hands the
+//! app the canvas, so the page can hold content under it.
 
 pub mod canvas_fallback;
 
@@ -51,4 +53,4 @@ pub use logging::init_logging;
 #[cfg(target_family = "wasm")]
 pub use platform::{WebPlatform, WebWindowError};
 #[cfg(target_family = "wasm")]
-pub use window::WebWindow;
+pub use window::{WebWindow, window_canvas};
