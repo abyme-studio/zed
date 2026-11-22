@@ -18,11 +18,11 @@ use android_activity::{AndroidApp, AndroidAppWaker, MainEvent, PollEvent};
 use anyhow::anyhow;
 use futures::channel::oneshot;
 use gpui::{
-    Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem, CursorStyle,
+    Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels,
     DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, PriorityQueueReceiver, Result, RunnableVariant, Task, ThermalState,
-    WindowAppearance, WindowParams,
+    Point, WindowAppearance, WindowParams, point,
 };
 use gpui_wgpu::{CosmicTextSystem, GpuContext};
 
@@ -113,6 +113,9 @@ pub(crate) struct AndroidPlatformState {
     /// The windows beyond the activity's own, by id, each on a surface the app hands over.
     others: RefCell<Vec<(u64, Weak<AndroidWindowState>)>>,
     next_other: Cell<u64>,
+    /// The activity's own surface's top left on the screen, as last told: kept for its window,
+    /// which may open after the app first tells it.
+    main_origin: Cell<Point<DevicePixels>>,
     destroyed: Cell<bool>,
     input_available: Cell<bool>,
     appearance: Cell<WindowAppearance>,
@@ -151,6 +154,7 @@ impl AndroidPlatform {
             window: RefCell::new(Weak::new()),
             others: RefCell::new(Vec::new()),
             next_other: Cell::new(1),
+            main_origin: Cell::new(Point::default()),
             destroyed: Cell::new(false),
             input_available: Cell::new(false),
             appearance: Cell::new(appearance),
@@ -210,6 +214,16 @@ impl AndroidPlatformState {
             Told::Insets(id, safe, ime) => {
                 if let Some(window) = self.other(id) {
                     window.set_insets(others::as_insets(safe, ime, scale));
+                }
+            }
+            Told::Placed(id, x, y) => {
+                let origin = point(DevicePixels(x), DevicePixels(y));
+                if id == 0 {
+                    self.main_origin.set(origin);
+                }
+                let window = if id == 0 { self.window() } else { self.other(id) };
+                if let Some(window) = window {
+                    window.set_origin(origin);
                 }
             }
             Told::Focus(id, focused) => {
@@ -425,6 +439,7 @@ impl Platform for AndroidPlatform {
             return Ok(Box::new(window));
         }
         let window = AndroidWindow::new(handle, options, self.0.app.clone(), self.0.gpu_context.clone(), None)?;
+        window.0.set_origin(self.0.main_origin.get());
         self.0.window.replace(Rc::downgrade(&window.0));
         Ok(Box::new(window))
     }
