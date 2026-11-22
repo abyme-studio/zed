@@ -13,7 +13,7 @@ use android_activity::AndroidApp;
 use android_activity::input::{ImeOptions, InputType, TextInputState, TextSpan};
 use crate::android::CallbackSlot;
 use gpui::{
-    Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration,
+    Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration, TextInputMode,
     TextInputStateChange,
 };
 
@@ -118,24 +118,36 @@ impl TextInput {
         if *self.configuration.borrow() == configuration {
             return;
         }
-        let mut input_type = InputType::TYPE_CLASS_TEXT;
-        input_type |= match configuration.autocapitalize {
-            Autocapitalize::None => InputType::empty(),
-            Autocapitalize::Words => InputType::TYPE_TEXT_FLAG_CAP_WORDS,
-            Autocapitalize::Sentences => InputType::TYPE_TEXT_FLAG_CAP_SENTENCES,
-            Autocapitalize::Characters => InputType::TYPE_TEXT_FLAG_CAP_CHARACTERS,
+        // The text flags are bits that mean other things on the number and phone classes.
+        let (mut input_type, text) = match configuration.input_mode {
+            TextInputMode::Decimal => (InputType::TYPE_CLASS_NUMBER | InputType::TYPE_NUMBER_FLAG_DECIMAL, false),
+            TextInputMode::Numeric => (InputType::TYPE_CLASS_NUMBER, false),
+            TextInputMode::Tel => (InputType::TYPE_CLASS_PHONE, false),
+            TextInputMode::Email => (InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_EMAIL_ADDRESS, true),
+            TextInputMode::Url => (InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_URI, true),
+            TextInputMode::Text | TextInputMode::Search | TextInputMode::None => (InputType::TYPE_CLASS_TEXT, true),
         };
-        if configuration.autocorrect {
-            input_type |= InputType::TYPE_TEXT_FLAG_AUTO_CORRECT;
-        }
-        if !configuration.suggestions {
-            input_type |= InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        if text {
+            input_type |= match configuration.autocapitalize {
+                Autocapitalize::None => InputType::empty(),
+                Autocapitalize::Words => InputType::TYPE_TEXT_FLAG_CAP_WORDS,
+                Autocapitalize::Sentences => InputType::TYPE_TEXT_FLAG_CAP_SENTENCES,
+                Autocapitalize::Characters => InputType::TYPE_TEXT_FLAG_CAP_CHARACTERS,
+            };
+            if configuration.autocorrect {
+                input_type |= InputType::TYPE_TEXT_FLAG_AUTO_CORRECT;
+            }
+            if !configuration.suggestions {
+                input_type |= InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            }
         }
         use android_activity::input::TextInputAction as Ime;
         let action = match configuration.input_action {
             TextInputAction::Unspecified => Ime::Unspecified,
             TextInputAction::Enter => {
-                input_type |= InputType::TYPE_TEXT_FLAG_MULTI_LINE;
+                if text {
+                    input_type |= InputType::TYPE_TEXT_FLAG_MULTI_LINE;
+                }
                 Ime::None
             }
             TextInputAction::Done => Ime::Done,

@@ -1,6 +1,6 @@
 use super::window::{IosWindowState, WindowReference};
 use gpui::{
-    Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration,
+    Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration, TextInputMode,
     TextInputStateChange, px,
 };
 use objc2::rc::{Retained, Weak};
@@ -223,7 +223,17 @@ define_class!(
 
     unsafe impl UITextInputTraits for TextInputView {
         #[unsafe(method(keyboardType))]
-        fn keyboard_type(&self) -> UIKeyboardType { UIKeyboardType::Default }
+        fn keyboard_type(&self) -> UIKeyboardType {
+            match self.ivars().configuration.borrow().input_mode {
+                TextInputMode::Text | TextInputMode::None => UIKeyboardType::Default,
+                TextInputMode::Decimal => UIKeyboardType::DecimalPad,
+                TextInputMode::Numeric => UIKeyboardType::NumberPad,
+                TextInputMode::Tel => UIKeyboardType::PhonePad,
+                TextInputMode::Search => UIKeyboardType::WebSearch,
+                TextInputMode::Email => UIKeyboardType::EmailAddress,
+                TextInputMode::Url => UIKeyboardType::URL,
+            }
+        }
         #[unsafe(method(autocorrectionType))]
         fn autocorrection_type(&self) -> UITextAutocorrectionType {
             if self.ivars().configuration.borrow().autocorrect { UITextAutocorrectionType::Yes } else { UITextAutocorrectionType::No }
@@ -882,7 +892,9 @@ pub(super) mod tests {
             autocapitalize: Autocapitalize::Sentences,
             suggestions: true,
             input_action: TextInputAction::Search,
+            input_mode: TextInputMode::Decimal,
         });
+        assert_eq!(view.keyboardType(), UIKeyboardType::DecimalPad);
         assert_eq!(view.autocorrectionType(), UITextAutocorrectionType::Yes);
         assert_eq!(
             view.autocapitalizationType(),
