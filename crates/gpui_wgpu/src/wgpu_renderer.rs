@@ -2886,4 +2886,124 @@ mod tests {
             ]
         );
     }
+
+    /// Line and dot patterns and dotted borders, drawn by the headless renderer.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    mod pixels {
+        use crate::WgpuHeadlessRenderer;
+        use gpui::{
+            BorderStyle, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla, PatternLines,
+            PlatformHeadlessRenderer, Point, Quad, ScaledPixels, Scene, Size, pattern_dots,
+            pattern_lines,
+        };
+
+        fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
+            Bounds {
+                origin: Point {
+                    x: x.into(),
+                    y: y.into(),
+                },
+                size: Size {
+                    width: w.into(),
+                    height: h.into(),
+                },
+            }
+        }
+
+        fn quad(bounds: Bounds<ScaledPixels>, background: gpui::Background) -> Quad {
+            Quad {
+                order: 0,
+                border_style: BorderStyle::Solid,
+                bounds,
+                content_mask: ContentMask { bounds },
+                background,
+                border_color: Hsla::transparent_black(),
+                corner_radii: Corners::default(),
+                border_widths: Edges::default(),
+            }
+        }
+
+        fn draw(scene: &mut Scene, w: i32, h: i32) -> image::RgbaImage {
+            scene.finish();
+            let mut renderer = WgpuHeadlessRenderer::new().expect("a headless renderer");
+            renderer
+                .render_scene_to_image(
+                    scene,
+                    Size {
+                        width: DevicePixels(w),
+                        height: DevicePixels(h),
+                    },
+                )
+                .expect("a frame")
+        }
+
+        fn red(image: &image::RgbaImage, x: u32, y: u32) -> u8 {
+            image.get_pixel(x, y).0[0]
+        }
+
+        #[test]
+        fn dots_sit_at_each_tiles_centre() {
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(
+                rect(0., 0., 32., 32.),
+                pattern_dots(gpui::red(), 16., 2.),
+            ));
+            let image = draw(&mut scene, 32, 32);
+            assert!(
+                red(&image, 8, 8) > 240 && red(&image, 24, 24) > 240,
+                "a dot at each centre"
+            );
+            assert!(
+                red(&image, 0, 0) < 15 && red(&image, 15, 8) < 15,
+                "nothing between them"
+            );
+        }
+
+        #[test]
+        fn grid_lines_run_from_the_corner() {
+            let mut scene = Scene::default();
+            scene.insert_primitive(quad(
+                rect(0., 0., 32., 32.),
+                pattern_lines(gpui::red(), 16., 1., PatternLines::Grid),
+            ));
+            scene.insert_primitive(quad(
+                rect(0., 40., 32., 32.),
+                pattern_lines(gpui::red(), 16., 1., PatternLines::Horizontal),
+            ));
+            let image = draw(&mut scene, 32, 72);
+            assert!(
+                red(&image, 0, 5) > 240 && red(&image, 16, 5) > 240 && red(&image, 5, 16) > 240,
+                "both ways"
+            );
+            assert!(red(&image, 5, 5) < 15, "nothing inside a tile");
+            assert!(
+                red(&image, 5, 56) > 240 && red(&image, 0, 45) < 15,
+                "horizontal only"
+            );
+        }
+
+        #[test]
+        fn a_dotted_border_is_round_dots_with_gaps() {
+            let mut scene = Scene::default();
+            let mut q = quad(rect(0., 0., 64., 16.), Hsla::transparent_black().into());
+            q.border_style = BorderStyle::Dotted;
+            q.border_color = gpui::red();
+            q.border_widths = Edges {
+                top: 4.0.into(),
+                ..Default::default()
+            };
+            scene.insert_primitive(q);
+            let image = draw(&mut scene, 64, 16);
+            let row = |y: u32| (0..64).map(|x| red(&image, x, y) as u32).collect::<Vec<_>>();
+            let (edge, middle) = (row(0), row(2));
+            assert!(
+                middle.iter().any(|&r| r > 200) && middle.iter().any(|&r| r < 15),
+                "dots and gaps: {middle:?}"
+            );
+            assert!(
+                edge.iter().sum::<u32>() < middle.iter().sum::<u32>(),
+                "round: thinner at the edge than the middle"
+            );
+        }
+    }
 }

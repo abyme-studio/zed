@@ -908,6 +908,8 @@ pub enum BorderStyle {
     Solid = 0,
     /// A dashed border.
     Dashed = 1,
+    /// A dotted border: round dots as wide as the border, one dot's width apart.
+    Dotted = 2,
 }
 
 /// A data type representing a 2 dimensional transformation that can be applied to an element.

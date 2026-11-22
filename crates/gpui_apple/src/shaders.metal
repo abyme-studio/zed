@@ -32,6 +32,9 @@ struct ClippedVertex {
 ClippedVertex clip_to_mask(float2 unit_vertex, Bounds_ScaledPixels bounds,
                            Bounds_ScaledPixels mask);
 float corner_dash_velocity(float dv1, float dv2);
+float dash_or_dot_alpha(bool dotted, float t, float period, float length,
+                        float dash_velocity, float outer_sdf,
+                        float antialias_threshold);
 float dash_alpha(float t, float period, float length, float dash_velocity,
                  float antialias_threshold);
 float quarter_ellipse_sdf(float2 point, float2 radii);
@@ -212,8 +215,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
   if (border_sdf < antialias_threshold) {
     float4 border_color = input.border_color;
 
-    // Dashed border logic when border_style == 1
-    if (quad.border_style == 1) {
+    // Dashed border logic when border_style == 1; dotted, 2, lays round dots
+    // out the same way.
+    if (quad.border_style == 1 || quad.border_style == 2) {
       // Position along the perimeter in "dash space", where each dash
       // period has length 1
       float t = 0.0;
@@ -226,8 +230,10 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
       // used by browsers, but also avoids dashes from different segments
       // overlapping when dash size is smaller than the border width.
       //
-      // Dash pattern: (2 * border width) dash, (1 * border width) gap
-      const float dash_length_per_width = 2.0;
+      // Dash pattern: (2 * border width) dash, (1 * border width) gap; a dot
+      // is (1 * border width) across.
+      bool dotted = quad.border_style == 2;
+      const float dash_length_per_width = dotted ? 1.0 : 2.0;
       const float dash_gap_per_width = 1.0;
       const float dash_period_per_width = dash_length_per_width + dash_gap_per_width;
 
@@ -371,8 +377,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
         // Adjust dash gap to evenly divide max_t
         float dash_count = floor(max_t);
         float dash_period = max_t / dash_count;
-        border_color.a *= dash_alpha(t, dash_period, dash_length, dash_velocity,
-                                     antialias_threshold);
+        border_color.a *= dash_or_dot_alpha(dotted, t, dash_period, dash_length,
+                                            dash_velocity, outer_sdf,
+                                            antialias_threshold);
       } else if (unrounded) {
         // When there isn't enough space for the full gap between the
         // two start / end dashes of a straight border, reduce gap to
@@ -380,8 +387,9 @@ fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
         float dash_gap = max_t - dash_length;
         if (dash_gap > 0.0) {
           float dash_period = dash_length + dash_gap;
-          border_color.a *= dash_alpha(t, dash_period, dash_length, dash_velocity,
-                                       antialias_threshold);
+          border_color.a *= dash_or_dot_alpha(dotted, t, dash_period, dash_length,
+                                              dash_velocity, outer_sdf,
+                                              antialias_threshold);
         }
       }
     }
@@ -409,6 +417,21 @@ float corner_dash_velocity(float dv1, float dv2) {
   } else {
     return min(dv1, dv2);
   }
+}
+
+// A dash's alpha, or for a dotted border a round dot's: its diameter the
+// dash's length in pixels, its centre on the border's middle line (outer_sdf
+// is negative inside the outer edge).
+float dash_or_dot_alpha(bool dotted, float t, float period, float length,
+                        float dash_velocity, float outer_sdf,
+                        float antialias_threshold) {
+  if (!dotted) {
+    return dash_alpha(t, period, length, dash_velocity, antialias_threshold);
+  }
+  float radius = length / dash_velocity / 2.0;
+  float along = (fmod(t + period / 2.0 - length / 2.0, period) - period / 2.0) / dash_velocity;
+  float across = outer_sdf + radius;
+  return saturate(antialias_threshold - (sqrt(along * along + across * across) - radius));
 }
 
 // Returns alpha used to render antialiased dashes.
@@ -1333,6 +1356,30 @@ float4 background_color(PreparedBackground prepared, Background background,
       float y_index = floor(relative_position.y / cell_size);
       color.a *= saturate(fmod(x_index + y_index, 2.0));
       break;
+    }
+    case 4: {
+        // Lines colors[0].percentage wide every size from the corner, both
+        // ways (0), horizontal (1) or vertical (2).
+        float size = background.gradient_angle_or_pattern_height;
+        float width = background.colors[0].percentage;
+        uint lines = uint(background.colors[1].percentage);
+        float2 at = position - float2(bounds.origin.x, bounds.origin.y);
+        float2 into = at - size * floor(at / size);
+        float2 across = saturate(float2(width) - into + 0.5) * saturate(into + 0.5);
+        float cover = 0.0;
+        if (lines != 1) { cover = max(cover, across.x); }
+        if (lines != 2) { cover = max(cover, across.y); }
+        color.a *= cover;
+        break;
+    }
+    case 5: {
+        // A disc of radius colors[0].percentage at each size tile's centre.
+        float size = background.gradient_angle_or_pattern_height;
+        float radius = background.colors[0].percentage;
+        float2 at = position - float2(bounds.origin.x, bounds.origin.y);
+        float2 into = at - size * floor(at / size) - size / 2.0;
+        color.a *= saturate(radius - length(into) + 0.5);
+        break;
     }
   }
 
