@@ -47,6 +47,8 @@ pub(crate) struct WebWindowMutableState {
     pub(crate) visibility: WindowVisibility,
     pub(crate) is_hovered: bool,
     pub(crate) mouse_position: Point<Pixels>,
+    /// The last pointer event's pointer (`PlatformWindow::pointer`).
+    pub(crate) pointer: Option<gpui::PointerInfo>,
     pub(crate) modifiers: Modifiers,
     pub(crate) capslock: Capslock,
     /// The app's background: anything but opaque draws the canvas clear where nothing paints,
@@ -222,6 +224,7 @@ impl WebWindow {
             visibility: document_visibility(&browser_window),
             is_hovered: false,
             mouse_position: Point::default(),
+            pointer: None,
             modifiers: Modifiers::default(),
             capslock: Capslock::default(),
             background_appearance: WindowBackgroundAppearance::Opaque,
@@ -791,6 +794,10 @@ impl PlatformWindow for WebWindow {
 
     fn mouse_position(&self) -> Point<Pixels> {
         self.inner.state.borrow().mouse_position
+    }
+
+    fn pointer(&self) -> Option<gpui::PointerInfo> {
+        self.inner.state.borrow().pointer
     }
 
     fn modifiers(&self) -> Modifiers {

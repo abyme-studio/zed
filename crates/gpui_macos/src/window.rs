@@ -675,6 +675,8 @@ struct MacWindowState {
     input_handler: Option<PlatformInputHandler>,
     last_key_equivalent: Option<KeyDownEvent>,
     last_left_mouse_down_event: Option<Retained<AnyObject>>,
+    /// The last mouse event's pointer (`PlatformWindow::pointer`): a tablet's pen, or the mouse.
+    pointer: Option<gpui::PointerInfo>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
     traffic_light_frames: Option<TrafficLightFrames>,
@@ -1138,6 +1140,7 @@ impl MacWindow {
                 input_handler: None,
                 last_key_equivalent: None,
                 last_left_mouse_down_event: None,
+                pointer: None,
                 synthetic_drag_counter: 0,
                 traffic_light_position: titlebar
                     .as_ref()
@@ -1681,6 +1684,10 @@ impl PlatformWindow for MacWindow {
         let screen: *mut AnyObject = unsafe { msg_send![self.0.lock().native_window, screen] };
         let display_id = display_id_for_screen(screen)?;
         Some(Rc::new(MacDisplay(display_id)))
+    }
+
+    fn pointer(&self) -> Option<gpui::PointerInfo> {
+        self.0.lock().pointer
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
@@ -2849,6 +2856,26 @@ extern "C" fn handle_key_event(
     }
 }
 
+/// A mouse event's pointer: a tablet's pen, with its pressure and device, when AppKit marks the event
+/// a tablet point; else the mouse, which reports no pressure of its own.
+unsafe fn mouse_pointer(native_event: *mut AnyObject) -> gpui::PointerInfo {
+    // NSEventSubtypeTabletPoint.
+    const TABLET_POINT: i16 = 1;
+    let subtype: i16 = unsafe { msg_send![native_event, subtype] };
+    if subtype != TABLET_POINT {
+        return gpui::PointerInfo::default();
+    }
+    let pressure: f32 = unsafe { msg_send![native_event, pressure] };
+    let device: usize = unsafe { msg_send![native_event, deviceID] };
+    gpui::PointerInfo {
+        kind: gpui::PointerKind::Pen,
+        id: device as u64,
+        width: 0.0,
+        height: 0.0,
+        pressure: Some(pressure.clamp(0.0, 1.0)),
+    }
+}
+
 extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
     let weak_window_state = Rc::downgrade(&window_state);
@@ -2865,6 +2892,21 @@ extern "C" fn handle_view_event(this: &AnyObject, _: Sel, native_event: *mut Any
             lock.last_left_mouse_down_event = None;
         }
         _ => {}
+    }
+    if matches!(
+        native_event_type,
+        NSEventType::LeftMouseDown
+            | NSEventType::LeftMouseUp
+            | NSEventType::LeftMouseDragged
+            | NSEventType::RightMouseDown
+            | NSEventType::RightMouseUp
+            | NSEventType::RightMouseDragged
+            | NSEventType::OtherMouseDown
+            | NSEventType::OtherMouseUp
+            | NSEventType::OtherMouseDragged
+            | NSEventType::MouseMoved
+    ) {
+        lock.pointer = Some(unsafe { mouse_pointer(native_event) });
     }
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
 

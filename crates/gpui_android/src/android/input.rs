@@ -2,7 +2,7 @@
 //! down and up with the character the device's key map gives.
 
 use android_activity::input::{
-    InputEvent, KeyAction, KeyEvent, Keycode, MetaState, MotionAction, MotionEvent,
+    InputEvent, KeyAction, KeyEvent, Keycode, MetaState, MotionAction, MotionEvent, Pointer, ToolType,
 };
 use android_activity::{AndroidApp, InputStatus};
 use gpui::{
@@ -49,15 +49,46 @@ fn position(x: f32, y: f32, scale: f32) -> Point<gpui::Pixels> {
     Point { x: px(x / scale), y: px(y / scale) }
 }
 
-pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, scale: f32) {
+/// What touched, as `PlatformWindow::pointer` reports it: the tool, and the contact's major and minor
+/// axes in device pixels (0 when not reported).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Contact {
+    pub kind: gpui::PointerKind,
+    pub major: f32,
+    pub minor: f32,
+}
+
+impl Contact {
+    /// A finger of unknown size: what a touch told from another window carries.
+    pub(crate) const FINGER: Contact = Contact { kind: gpui::PointerKind::Touch, major: 0.0, minor: 0.0 };
+
+    fn of(p: &Pointer<'_>) -> Contact {
+        let kind = match p.tool_type() {
+            ToolType::Stylus | ToolType::Eraser => gpui::PointerKind::Pen,
+            ToolType::Mouse => gpui::PointerKind::Mouse,
+            _ => gpui::PointerKind::Touch,
+        };
+        Contact { kind, major: p.touch_major(), minor: p.touch_minor() }
+    }
+}
+
+pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, scale: f32, contact: Contact) {
+    let force = (pressure > 0.0).then_some(pressure.clamp(0.0, 1.0));
     let event = TouchEvent {
         id: TouchId(id as u64),
         phase,
         position: position(x, y, scale),
         predicted_position: None,
-        force: (pressure > 0.0).then_some(pressure.clamp(0.0, 1.0)),
+        force,
     };
     window.mouse_position.set(event.position);
+    window.pointer.set(Some(gpui::PointerInfo {
+        kind: contact.kind,
+        id: id.max(0) as u64,
+        width: contact.major.max(0.0) / scale,
+        height: contact.minor.max(0.0) / scale,
+        pressure: force,
+    }));
     window.input_callback.with(|callback| callback(PlatformInput::Touch(event)));
 }
 
@@ -66,20 +97,20 @@ fn motion_event(window: &AndroidWindowState, motion: &MotionEvent<'_>, scale: f3
     match motion.action() {
         MotionAction::Down | MotionAction::PointerDown => {
             let p = motion.pointer_at_index(index);
-            touch(window, p.pointer_id(), TouchPhase::Started, p.x(), p.y(), p.pressure(), scale);
+            touch(window, p.pointer_id(), TouchPhase::Started, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
         }
         MotionAction::Up | MotionAction::PointerUp => {
             let p = motion.pointer_at_index(index);
-            touch(window, p.pointer_id(), TouchPhase::Ended, p.x(), p.y(), p.pressure(), scale);
+            touch(window, p.pointer_id(), TouchPhase::Ended, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
         }
         MotionAction::Move => {
             for p in motion.pointers() {
-                touch(window, p.pointer_id(), TouchPhase::Moved, p.x(), p.y(), p.pressure(), scale);
+                touch(window, p.pointer_id(), TouchPhase::Moved, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
             }
         }
         MotionAction::Cancel => {
             for p in motion.pointers() {
-                touch(window, p.pointer_id(), TouchPhase::Cancelled, p.x(), p.y(), p.pressure(), scale);
+                touch(window, p.pointer_id(), TouchPhase::Cancelled, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
             }
         }
         _ => return InputStatus::Unhandled,
