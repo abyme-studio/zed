@@ -2645,6 +2645,34 @@ pub struct TextInputConfiguration {
     pub suggestions: bool,
     /// The action advertised on a software keyboard's confirm ("enter") key.
     pub input_action: TextInputAction,
+    /// The kind of software keyboard to show for the text.
+    pub input_mode: TextInputMode,
+}
+
+/// The kind of software keyboard a text region asks for.
+///
+/// The variants are the HTML `inputmode` attribute's value set
+/// (<https://html.spec.whatwg.org/multipage/interaction.html#input-modalities:-the-inputmode-attribute>),
+/// which maps onto Android's `InputType` classes and iOS's `UIKeyboardType`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextInputMode {
+    /// The platform's ordinary text keyboard.
+    #[default]
+    Text,
+    /// No software keyboard, where the platform allows it (the web); native hosts show text.
+    None,
+    /// Digits and a decimal separator.
+    Decimal,
+    /// Digits alone.
+    Numeric,
+    /// A telephone keypad.
+    Tel,
+    /// Text, for a search query.
+    Search,
+    /// Text, for an email address.
+    Email,
+    /// Text, for a URL.
+    Url,
 }
 
 /// Automatic capitalization applied by software keyboards.
