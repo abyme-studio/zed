@@ -286,6 +286,8 @@ pub(crate) struct IosWindowState {
     keyboard_height: Cell<f32>,
     /// Current mouse position (from touch)
     mouse_position: Cell<Point<Pixels>>,
+    /// The last touch's pointer (`PlatformWindow::pointer`).
+    pointer: Cell<Option<gpui::PointerInfo>>,
     /// Current modifiers
     modifiers: Cell<Modifiers>,
     renderer: Mutex<MetalRenderer>,
@@ -445,6 +447,7 @@ impl IosWindow {
             back_gesture_start: Cell::new(None),
             keyboard_height: Cell::new(0.),
             mouse_position: Cell::new(Point::default()),
+            pointer: Cell::new(None),
             modifiers: Cell::new(Modifiers::default()),
             renderer: Mutex::new(renderer),
         };
@@ -534,6 +537,7 @@ impl IosWindowState {
     fn handle_touch_sample(&self, touch: &UITouch, id: TouchId) {
         let position = touch_location_in_view(touch, &self.view);
         self.mouse_position.set(position);
+        self.pointer.set(Some(touch_pointer(touch, id)));
 
         let event = TouchEvent {
             id,
@@ -880,6 +884,10 @@ impl PlatformWindow for IosWindow {
 
     fn mouse_position(&self) -> Point<Pixels> {
         self.mouse_position.get()
+    }
+
+    fn pointer(&self) -> Option<gpui::PointerInfo> {
+        self.pointer.get()
     }
 
     fn modifiers(&self) -> Modifiers {

@@ -40,7 +40,7 @@ use crate::{
     Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, Corners,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
-    LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
+    LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, PointerInfo, Priority,
     RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Scene, ShapedGlyph,
     ShapedRun, SharedString, Size, SvgRenderer, SystemWindowTab, Task, Window, WindowControlArea,
     hash, point, px, size,
@@ -1334,6 +1334,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// afterwards changes arrive through [`Self::on_visibility_change`].
     fn visibility(&self) -> WindowVisibility;
     fn is_hovered(&self) -> bool;
+    /// The pointer behind the last pointer input, where the platform reports
+    /// more than the event types carry ([`PointerInfo`]).
+    fn pointer(&self) -> Option<PointerInfo> {
+        None
+    }
     fn background_appearance(&self) -> WindowBackgroundAppearance;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);

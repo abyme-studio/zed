@@ -3776,6 +3776,12 @@ impl Window {
         self.mouse_position
     }
 
+    /// The pointer behind the last pointer input: its kind, id, contact size
+    /// and pressure, where the platform reports them; none where it does not.
+    pub fn pointer(&self) -> Option<crate::PointerInfo> {
+        self.platform_window.pointer()
+    }
+
     /// Captures the pointer for the given hitbox. While captured, all mouse move and mouse up
     /// events will be routed to listeners that check this hitbox's `is_hovered` status,
     /// regardless of actual hit testing. This enables drag operations that continue

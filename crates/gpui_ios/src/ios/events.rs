@@ -7,7 +7,7 @@ use gpui::{
 use objc2_core_foundation::CGPoint;
 use objc2_ui_kit::{
     UIGestureRecognizerState, UIKeyModifierFlags, UIPanGestureRecognizer, UIRectEdge,
-    UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UIView,
+    UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UITouchType, UIView,
 };
 
 /// A release faster than this, in points per second toward going back, commits
@@ -117,6 +117,18 @@ fn modifiers(flags: UIKeyModifierFlags) -> Modifiers {
         platform: flags.contains(UIKeyModifierFlags::Command),
         function: false,
     }
+}
+
+/// A touch's pointer: Apple Pencil is a pen, a pointer device a mouse, else a finger; the contact a
+/// circle of UIKit's major radius (none for a pen or pointer, which report none).
+pub fn touch_pointer(touch: &UITouch, id: TouchId) -> gpui::PointerInfo {
+    let kind = match touch.r#type() {
+        UITouchType::Pencil => gpui::PointerKind::Pen,
+        UITouchType::IndirectPointer => gpui::PointerKind::Mouse,
+        _ => gpui::PointerKind::Touch,
+    };
+    let size = if kind == gpui::PointerKind::Touch { (touch.majorRadius() * 2.0) as f32 } else { 0.0 };
+    gpui::PointerInfo { kind, id: id.0, width: size, height: size, pressure: touch_force(touch) }
 }
 
 pub fn touch_force(touch: &UITouch) -> Option<f32> {
