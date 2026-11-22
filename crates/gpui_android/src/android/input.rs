@@ -25,16 +25,7 @@ pub(crate) fn drain(app: &AndroidApp, window: &AndroidWindowState, scale: f32) {
                 InputStatus::Handled
             }
             InputEvent::TextAction(_) => {
-                // The keyboard's action key: GPUI binds it as enter.
-                let keystroke = Keystroke { modifiers: Modifiers::default(), key: "enter".into(), key_char: None };
-                window.input_callback.with(|callback| {
-                    callback(PlatformInput::KeyDown(KeyDownEvent {
-                        keystroke: keystroke.clone(),
-                        is_held: false,
-                        prefer_character_input: false,
-                    }));
-                    callback(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
-                });
+                action(window);
                 InputStatus::Handled
             }
             _ => InputStatus::Unhandled,
@@ -43,6 +34,27 @@ pub(crate) fn drain(app: &AndroidApp, window: &AndroidWindowState, scale: f32) {
             break;
         }
     }
+}
+
+/// The keyboard's action key: GPUI binds it as enter.
+pub(crate) fn action(window: &AndroidWindowState) {
+    let keystroke = Keystroke { modifiers: Modifiers::default(), key: "enter".into(), key_char: None };
+    window.input_callback.with(|callback| {
+        callback(PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        }));
+        callback(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
+    });
+}
+
+/// A key told from another window's view (others.rs), with the characters its view read from it.
+pub(crate) fn told_key(window: &AndroidWindowState, code: u32, meta: u32, down: bool, repeat: i32, typed: u32, bare: u32) {
+    let meta = MetaState(meta);
+    let character = |m: MetaState| char::from_u32(if m.0 == 0 { bare } else { typed }).filter(|c| *c != '\0');
+    let action = if down { KeyAction::Down } else { KeyAction::Up };
+    key(window, Keycode::from(code), meta, action, repeat, &character);
 }
 
 fn position(x: f32, y: f32, scale: f32) -> Point<gpui::Pixels> {
@@ -179,17 +191,38 @@ fn is_modifier(code: Keycode) -> bool {
     )
 }
 
-fn key_event(app: &AndroidApp, window: &AndroidWindowState, key: &KeyEvent<'_>) -> InputStatus {
-    let code = key.key_code();
-    let mods = modifiers(key.meta_state());
+fn key_event(app: &AndroidApp, window: &AndroidWindowState, event: &KeyEvent<'_>) -> InputStatus {
+    // The character the key types, from the device's key map.
+    let character = |meta: MetaState| -> Option<char> {
+        let map = app.device_key_character_map(event.device_id()).ok()?;
+        match map.get(event.key_code(), meta).ok()? {
+            android_activity::input::KeyMapChar::Unicode(c) => Some(c),
+            android_activity::input::KeyMapChar::CombiningAccent(c) => Some(c),
+            android_activity::input::KeyMapChar::None => None,
+        }
+    };
+    key(window, event.key_code(), event.meta_state(), event.action(), event.repeat_count(), &character)
+}
+
+/// A key as GPUI's key down or up; `character` gives what it types with a meta state, with shift for
+/// the key's name as GPUI binds it, without for `key`.
+fn key(
+    window: &AndroidWindowState,
+    code: Keycode,
+    meta: MetaState,
+    action: KeyAction,
+    repeat: i32,
+    character: &dyn Fn(MetaState) -> Option<char>,
+) -> InputStatus {
+    let mods = modifiers(meta);
     window.modifiers.set(mods);
     if code == Keycode::Back {
         // The back key, as the system's back gesture: GPUI's handler when it has one, else the
         // system's own (the activity finishes).
-        if key.action() == KeyAction::Up && window.back() {
+        if action == KeyAction::Up && window.back() {
             return InputStatus::Handled;
         }
-        return if key.action() == KeyAction::Down && window.back_callback_set() {
+        return if action == KeyAction::Down && window.back_callback_set() {
             InputStatus::Handled
         } else {
             InputStatus::Unhandled
@@ -204,31 +237,21 @@ fn key_event(app: &AndroidApp, window: &AndroidWindowState, key: &KeyEvent<'_>) 
         });
         return InputStatus::Handled;
     }
-    // The character the key types, from the device's key map; with shift for the key's name as
-    // GPUI binds it, without for `key`.
-    let character = |meta: MetaState| -> Option<char> {
-        let map = app.device_key_character_map(key.device_id()).ok()?;
-        match map.get(code, meta).ok()? {
-            android_activity::input::KeyMapChar::Unicode(c) => Some(c),
-            android_activity::input::KeyMapChar::CombiningAccent(c) => Some(c),
-            android_activity::input::KeyMapChar::None => None,
-        }
-    };
     let (key_name, key_char) = match key_name(code) {
         Some(name) => (name.to_string(), (name == "space").then(|| " ".to_string())),
         None => {
             // With ctrl or meta held the map types nothing: the bare key names it then.
-            let typed = character(key.meta_state());
+            let typed = character(meta);
             let Some(bare) = character(MetaState(0)).or(typed) else { return InputStatus::Unhandled };
             let key_char = (!mods.control && !mods.platform).then(|| typed.map(|c| c.to_string())).flatten();
             (bare.to_lowercase().to_string(), key_char)
         }
     };
     let keystroke = Keystroke { modifiers: mods, key: key_name, key_char };
-    let input = match key.action() {
+    let input = match action {
         KeyAction::Down => PlatformInput::KeyDown(KeyDownEvent {
             keystroke,
-            is_held: key.repeat_count() > 0,
+            is_held: repeat > 0,
             prefer_character_input: false,
         }),
         KeyAction::Up => PlatformInput::KeyUp(KeyUpEvent { keystroke }),

@@ -249,6 +249,14 @@ impl AndroidWindowState {
         self.back_enabled.get() && self.back_callback.with(|callback| callback()).is_some()
     }
 
+    /// Where this window's keyboard is: the activity's own, or the app's view for it.
+    pub(crate) fn keyboard(&self) -> super::text_input::Keyboard<'_> {
+        match self.other {
+            Some(id) => super::text_input::Keyboard::Other(id),
+            None => super::text_input::Keyboard::Activity(&self.app),
+        }
+    }
+
     /// Whether a back press goes to GPUI rather than to the system.
     pub(crate) fn back_callback_set(&self) -> bool {
         self.back_enabled.get() && self.back_callback.is_set()
@@ -405,18 +413,11 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn text_input_state_changed(&self, change: gpui::TextInputStateChange) {
-        // The keyboard is the activity's own: another window takes no text yet.
-        if self.0.other.is_some() {
-            return;
-        }
-        self.0.text_input.state_changed(&self.0.app, &self.0.input_handler, change);
+        self.0.text_input.state_changed(self.0.keyboard(), &self.0.input_handler, change);
     }
 
     fn set_text_input_configuration(&mut self, configuration: gpui::TextInputConfiguration) {
-        if self.0.other.is_some() {
-            return;
-        }
-        self.0.text_input.set_configuration(&self.0.app, configuration);
+        self.0.text_input.set_configuration(self.0.keyboard(), configuration);
     }
 
     fn prompt(
