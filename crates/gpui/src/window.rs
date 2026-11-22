@@ -8,8 +8,8 @@ use crate::subscription::SingleSubscriberSet;
 use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
@@ -18,7 +18,7 @@ use crate::{
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, BackdropBlur, Shadow, SharedString, Size,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
     TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
@@ -2455,27 +2455,58 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future.
+/// rendered: outside `bounds`, and outside the rounded rectangle `rounded` with `corner_radii`
+/// when any radius is above zero, cut on its curve with a pixel of antialiasing, as CSS clips
+/// `overflow: hidden` with a `border-radius`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     /// The bounds
     pub bounds: Bounds<P>,
+    /// A rounded rectangle content is also cut to, when a radius of `corner_radii` is above zero.
+    pub rounded: Bounds<P>,
+    /// The rounded rectangle's radius per corner; all zero for none.
+    pub corner_radii: Corners<P>,
 }
 
 impl ContentMask<Pixels> {
+    /// A mask of `bounds` that is also the rounded rectangle of `bounds` with `corner_radii`.
+    pub fn rounded(bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>) -> Self {
+        ContentMask {
+            bounds,
+            rounded: bounds,
+            corner_radii,
+        }
+    }
+
+    /// Whether a corner of the rounded rectangle is curved.
+    pub fn is_rounded(&self) -> bool {
+        let c = &self.corner_radii;
+        [c.top_left, c.top_right, c.bottom_right, c.bottom_left]
+            .iter()
+            .any(|r| *r > px(0.))
+    }
+
     /// Scale the content mask's pixel units by the given scaling factor.
     pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
+            rounded: self.rounded.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
         }
     }
 
-    /// Intersect the content mask with the given content mask.
+    /// Intersect the content mask with the given content mask. The bounds intersect; the rounded
+    /// rectangle is this mask's when it rounds, else the other's (one rounded rectangle is kept,
+    /// the innermost when this is the newer mask).
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
-        ContentMask { bounds }
+        let round = if self.is_rounded() { self } else { other };
+        ContentMask {
+            bounds,
+            rounded: round.rounded,
+            corner_radii: round.corner_radii,
+        }
     }
 }
 
@@ -3494,6 +3525,7 @@ impl Window {
                         point(start, bounds.top()),
                         point(end, bounds.bottom()),
                     ),
+                    ..underline.content_mask
                 },
                 ..underline
             });
@@ -3565,8 +3597,10 @@ impl Window {
 
     #[inline]
     fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
+        let mask = self.content_mask();
         ContentMask {
-            bounds: self.cover_bounds(self.content_mask().bounds),
+            bounds: self.cover_bounds(mask.bounds),
+            ..mask.scale(self.scale_factor())
         }
     }
 
@@ -4577,6 +4611,7 @@ impl Window {
                     origin: Point::default(),
                     size: self.viewport_size,
                 },
+                ..Default::default()
             })
     }
 
@@ -4852,7 +4887,12 @@ impl Window {
     /// `backdrop-filter: blur()`: paint it before the element's own background.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn paint_backdrop_blur(&mut self, bounds: Bounds<Pixels>, corner_radii: Corners<Pixels>, radius: Pixels) {
+    pub fn paint_backdrop_blur(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        radius: Pixels,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -5019,6 +5059,7 @@ impl Window {
                 self.next_frame.scene.insert_primitive(Quad {
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
+                        ..quad.content_mask
                     },
                     ..quad
                 });
@@ -10021,6 +10062,7 @@ mod tests {
             let original_opacity = window.element_opacity();
             let mask = ContentMask {
                 bounds: Bounds::from_corners(point(px(4.), px(10.)), point(px(16.), px(12.))),
+                ..Default::default()
             };
             let style = UnderlineStyle {
                 thickness: px(2.),
@@ -10169,6 +10211,7 @@ mod tests {
                             point(px(-1000.), px(-1000.)),
                             point(px(1000.), px(1000.)),
                         ),
+                        ..Default::default()
                     });
                     paint(window);
                     window.content_mask_stack.pop();

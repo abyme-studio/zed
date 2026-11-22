@@ -287,6 +287,7 @@ fn build_scene(scene: &mut Scene, rectangles: &[Rectangle]) {
     scene.clear();
     let content_mask = gpui::ContentMask {
         bounds: Bounds::new(point(px(0.), px(0.)), size(px(1_024.), px(1_024.))).scale(1.),
+        ..Default::default()
     };
     for (index, rectangle) in rectangles.iter().enumerate() {
         let bounds = rectangle.bounds.scale(1.);
