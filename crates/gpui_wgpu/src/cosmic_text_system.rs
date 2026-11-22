@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 use std::{borrow::Cow, ops::Range, sync::Arc};
 use swash::{
     scale::{Render, ScaleContext, Source, StrikeWith},
-    zeno::{Format, Vector},
+    zeno::{Angle, Format, Transform, Vector},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -57,6 +57,8 @@ struct CosmicTextSystemState {
     /// A variable face at another weight than its default, by its default's `FontId` and the
     /// weight's bits: a `FontId` of its own, drawn at that weight.
     weighted_font_ids: HashMap<(FontId, u32), FontId>,
+    /// An upright face drawn slanted (`SLANT_DEGREES`), by its upright `FontId`: a faux italic.
+    slanted_font_ids: HashMap<FontId, FontId>,
     /// Caches the `FontId`s associated with a specific family to avoid iterating the font database
     /// for every font face in a family.
     font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
@@ -76,7 +78,12 @@ struct LoadedFont {
     coords: Arc<[i16]>,
     /// The weight `coords` draw it at, when it is not the face's own.
     weight: Option<f32>,
+    /// Drawn slanted right by this many degrees: a faux italic of an upright face.
+    skew: Option<f32>,
 }
+
+/// A faux italic's slant, degrees: Skia's, Chromium's and Parley's (fontique's `Synthesis::skew`).
+pub const SLANT_DEGREES: f32 = 14.0;
 
 impl LoadedFont {
     fn metrics(&self) -> swash::Metrics {
@@ -158,6 +165,7 @@ impl CosmicTextSystem {
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             weighted_font_ids: HashMap::default(),
+            slanted_font_ids: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
@@ -187,6 +195,7 @@ impl CosmicTextSystem {
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             weighted_font_ids: HashMap::default(),
+            slanted_font_ids: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
@@ -233,9 +242,24 @@ impl PlatformTextSystem for CosmicTextSystem {
             state.font_ids_by_family_cache[&key].as_ref()
         };
 
-        let ix = find_best_match(font, candidates, &state)?;
-        let font_id = candidates[ix];
-        Ok(state.at_weight(font_id, font.weight.0))
+        // Oblique is the upright face slanted (abyme's tessera asks it for a faux italic its own
+        // shaper drew), never an italic face; Italic is the family's italic face, else the same.
+        let upright = Font {
+            style: gpui::FontStyle::Normal,
+            ..font.clone()
+        };
+        let asked = if font.style == gpui::FontStyle::Oblique {
+            &upright
+        } else {
+            font
+        };
+        let ix = find_best_match(asked, candidates, &state)?;
+        let candidate = candidates[ix];
+        let font_id = state.at_weight(candidate, font.weight.0);
+        if font.style != gpui::FontStyle::Normal && !state.is_slanted(font_id) {
+            return Ok(state.slanted(font_id));
+        }
+        Ok(font_id)
     }
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
@@ -342,6 +366,7 @@ impl CosmicTextSystemState {
             user_fallback_chain: Arc::clone(&base.user_fallback_chain),
             coords,
             weight: Some(weight),
+            skew: base.skew,
         };
         let id = FontId(self.loaded_fonts.len());
         self.loaded_fonts.push(loaded);
@@ -351,6 +376,39 @@ impl CosmicTextSystemState {
 
     fn loaded_font(&self, font_id: FontId) -> &LoadedFont {
         &self.loaded_fonts[font_id.0]
+    }
+
+    /// Whether `font_id` draws slanted: an italic or oblique face, or a faux italic.
+    fn is_slanted(&self, font_id: FontId) -> bool {
+        let loaded = self.loaded_font(font_id);
+        loaded.skew.is_some()
+            || self
+                .font_system
+                .db()
+                .face(loaded.font.id())
+                .is_some_and(|face| face.style != Style::Normal)
+    }
+
+    /// `font_id`, an upright face, drawn slanted `SLANT_DEGREES` right: a `FontId` of its own, made
+    /// once. Its glyphs, advances and metrics are the upright face's, as a browser's faux italic.
+    fn slanted(&mut self, font_id: FontId) -> FontId {
+        if let Some(&id) = self.slanted_font_ids.get(&font_id) {
+            return id;
+        }
+        let base = &self.loaded_fonts[font_id.0];
+        let loaded = LoadedFont {
+            font: Arc::clone(&base.font),
+            features: base.features.clone(),
+            is_known_emoji_font: base.is_known_emoji_font,
+            user_fallback_chain: Arc::clone(&base.user_fallback_chain),
+            coords: Arc::clone(&base.coords),
+            weight: base.weight,
+            skew: Some(SLANT_DEGREES),
+        };
+        let id = FontId(self.loaded_fonts.len());
+        self.loaded_fonts.push(loaded);
+        self.slanted_font_ids.insert(font_id, id);
+        id
     }
 
     fn font_match_properties(&self, font_id: FontId) -> Option<FontMatchProperties> {
@@ -514,6 +572,7 @@ impl CosmicTextSystemState {
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
                 coords: Arc::from([]),
                 weight: None,
+                skew: None,
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
         }
@@ -617,6 +676,12 @@ impl CosmicTextSystemState {
         };
 
         let mut renderer = Render::new(sources);
+        // The outline is y up, so a positive x skew moves its top right.
+        renderer.transform(
+            loaded_font
+                .skew
+                .map(|degrees| Transform::skew(Angle::from_degrees(degrees), Angle::ZERO)),
+        );
         if params.subpixel_rendering {
             // There seems to be a bug in Swash where the B and R values are swapped.
             renderer
@@ -666,6 +731,7 @@ impl CosmicTextSystemState {
                 user_fallback_chain: Arc::from(Vec::new()),
                 coords: Arc::from([]),
                 weight: None,
+                skew: None,
             });
 
             Ok(font_id)

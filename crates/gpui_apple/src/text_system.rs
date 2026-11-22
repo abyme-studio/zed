@@ -10,7 +10,7 @@ use core_graphics::{
     base::{CGFloat, CGGlyph, kCGImageAlphaPremultipliedLast},
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
-    geometry::CGPoint,
+    geometry::{CGAffineTransform, CGPoint},
 };
 use core_text::{
     font::CTFont,
@@ -105,7 +105,15 @@ struct AppleTextSystemState {
     /// A variable face drawn at another weight than its own, by its own `FontId` and the weight's
     /// bits: a `FontId` of its own, a copy of the face at that point of its `wght` axis.
     weighted_font_ids: HashMap<(FontId, u32), FontId>,
+    /// An upright face drawn slanted (`SLANT_DEGREES`), by its upright `FontId`: a faux italic.
+    slanted_font_ids: HashMap<FontId, FontId>,
+    /// The slant of each faux italic `FontId`, as the tangent of its angle: x moves right by it per
+    /// unit up.
+    slants: HashMap<FontId, f32>,
 }
+
+/// A faux italic's slant, degrees: Skia's, Chromium's and Parley's (fontique's `Synthesis::skew`).
+pub const SLANT_DEGREES: f32 = 14.0;
 
 impl AppleTextSystem {
     /// Create a new AppleTextSystem.
@@ -119,6 +127,8 @@ impl AppleTextSystem {
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
             weighted_font_ids: HashMap::default(),
+            slanted_font_ids: HashMap::default(),
+            slants: HashMap::default(),
         }))
     }
 }
@@ -196,17 +206,27 @@ impl PlatformTextSystem for AppleTextSystem {
                 })
                 .collect::<SmallVec<[_; 4]>>();
 
+            // Oblique is the upright face slanted (abyme's tessera asks it for a faux italic its own
+            // shaper drew), never an italic face; Italic is the family's italic face, else the same.
+            let asked = if font.style == FontStyle::Oblique {
+                FontStyle::Normal
+            } else {
+                font.style
+            };
             let ix = font_kit::matching::find_best_match(
                 &candidate_properties,
                 &font_kit::properties::Properties {
-                    style: fontkit_style(font.style),
+                    style: fontkit_style(asked),
                     weight: fontkit_weight(font.weight),
                     stretch: Default::default(),
                 },
             )?;
 
             let font_id = candidates[ix];
-            let font_id = lock.at_weight(font_id, font.weight.0);
+            let mut font_id = lock.at_weight(font_id, font.weight.0);
+            if font.style != FontStyle::Normal && !lock.is_slanted(font_id) {
+                font_id = lock.slanted(font_id);
+            }
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -467,6 +487,29 @@ impl AppleTextSystemState {
         id
     }
 
+    /// Whether `font_id` draws slanted: an italic or oblique face, or a faux italic.
+    fn is_slanted(&self, font_id: FontId) -> bool {
+        self.slants.contains_key(&font_id)
+            || unsafe { lenient_traits::properties(&self.fonts[font_id.0].native_font()) }
+                .is_some_and(|p| p.style != FontkitStyle::Normal)
+    }
+
+    /// `font_id`, an upright face, drawn slanted `SLANT_DEGREES` right: a `FontId` of its own, made
+    /// once. Its glyphs, advances and metrics are the upright face's, as a browser's faux italic.
+    fn slanted(&mut self, font_id: FontId) -> FontId {
+        if let Some(&id) = self.slanted_font_ids.get(&font_id) {
+            return id;
+        }
+        let id = FontId(self.fonts.len());
+        self.fonts.push(self.fonts[font_id.0].clone());
+        if let Some(name) = self.postscript_names_by_font_id.get(&font_id).cloned() {
+            self.postscript_names_by_font_id.insert(id, name);
+        }
+        self.slants.insert(id, SLANT_DEGREES.to_radians().tan());
+        self.slanted_font_ids.insert(font_id, id);
+        id
+    }
+
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
         let postscript_name = requested_font.postscript_name();
         if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
@@ -504,6 +547,20 @@ impl AppleTextSystemState {
             font_kit::canvas::RasterizationOptions::GrayscaleAa,
         )?);
 
+        // A faux italic moves each row right by its height above the baseline times the slant:
+        // the bottom row's left edge and the top row's right edge bound it (y is down here).
+        let bounds = match self.slants.get(&params.font_id) {
+            Some(&slant) => {
+                let (top, bottom) = (bounds.origin.y.0 as f32, (bounds.origin.y.0 + bounds.size.height.0) as f32);
+                let left = bounds.origin.x.0 + (-slant * bottom).floor() as i32;
+                let right = bounds.origin.x.0 + bounds.size.width.0 + (-slant * top).ceil() as i32;
+                Bounds {
+                    origin: point(DevicePixels(left), bounds.origin.y),
+                    size: size(DevicePixels(right - left), bounds.size.height),
+                }
+            }
+            None => bounds,
+        };
         // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing.
         Ok(bounds.dilate(DevicePixels(1)))
     }
@@ -562,6 +619,10 @@ impl AppleTextSystemState {
                 params.scale_factor as CGFloat,
                 params.scale_factor as CGFloat,
             );
+            // A faux italic: y is up here, so x moves right by the slant per unit up.
+            if let Some(&slant) = self.slants.get(&params.font_id) {
+                cx.concat_ctm(CGAffineTransform::new(1.0, 0.0, slant as CGFloat, 1.0, 0.0, 0.0));
+            }
 
             let subpixel_shift = params
                 .subpixel_variant
