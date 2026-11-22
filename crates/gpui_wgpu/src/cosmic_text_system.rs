@@ -1498,7 +1498,13 @@ mod tests {
                 ..regular.clone()
             };
             let font_id = text_system.font_id(&requested)?;
-            assert_eq!(font_id, regular_id);
+            // A slanted request for a family with no italic face is its upright face drawn
+            // slanted, a faux italic with a FontId of its own; its face is still the upright one.
+            if style == gpui::FontStyle::Normal {
+                assert_eq!(font_id, regular_id);
+            } else {
+                assert_ne!(font_id, regular_id);
+            }
             assert_eq!(
                 text_system.font_weight_and_style(font_id)?,
                 (gpui::FontWeight::NORMAL, gpui::FontStyle::Normal)
