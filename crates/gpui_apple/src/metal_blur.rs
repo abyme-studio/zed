@@ -298,7 +298,7 @@ mod tests {
             order: 0,
             border_style: BorderStyle::Solid,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask { bounds, ..Default::default() },
             background,
             border_color: Hsla::transparent_black(),
             corner_radii: Corners::default(),
@@ -362,7 +362,7 @@ mod tests {
             order: 0,
             radius: 8.0.into(),
             bounds: rect(16., 16., 32., 32.),
-            content_mask: ContentMask { bounds: rect(0., 0., 64., 64.) },
+            content_mask: ContentMask { bounds: rect(0., 0., 64., 64.), ..Default::default() },
             corner_radii: Corners::default(),
         });
         let image = draw(&mut scene, 64, 64);

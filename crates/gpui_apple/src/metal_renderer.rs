@@ -647,7 +647,10 @@ impl MetalRenderer {
                     let buffer = unsafe { buffer.as_ref() };
                     let seconds = buffer.GPUEndTime() - buffer.GPUStartTime();
                     if seconds > 0.0 {
-                        eprintln!("gpu duration: {:?}", std::time::Duration::from_secs_f64(seconds));
+                        eprintln!(
+                            "gpu duration: {:?}",
+                            std::time::Duration::from_secs_f64(seconds)
+                        );
                     }
                 }
             },
@@ -916,12 +919,8 @@ impl MetalRenderer {
                 PrimitiveBatch::BackdropBlurs(range) => {
                     command_encoder.endEncoding();
                     for blur in &scene.backdrop_blurs[range] {
-                        self.backdrop.run(
-                            &self.device,
-                            blur,
-                            texture,
-                            &command_buffer,
-                        )?;
+                        self.backdrop
+                            .run(&self.device, blur, texture, &command_buffer)?;
                     }
                     command_encoder = new_command_encoder_for_texture(
                         &command_buffer,
@@ -1954,7 +1953,10 @@ mod tests {
         scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
             image_buffer,
         });
         scene.finish();
@@ -2111,7 +2113,10 @@ mod tests {
         scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
-            content_mask: ContentMask { bounds },
+            content_mask: ContentMask {
+                bounds,
+                ..Default::default()
+            },
             image_buffer: image_buffer.clone(),
         });
         drop(image_buffer);

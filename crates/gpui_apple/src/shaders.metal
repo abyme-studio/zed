@@ -42,6 +42,11 @@ float pick_corner_radius(float2 center_to_point, Corners_ScaledPixels corner_rad
 float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
                Corners_ScaledPixels corner_radii);
 float quad_sdf_impl(float2 center_to_point, float corner_radius);
+float rounded_rect_alpha(float2 point, float4 rect, float4 radii);
+float4 content_mask_rect(ContentMask_ScaledPixels mask);
+float4 content_mask_radii(ContentMask_ScaledPixels mask);
+bool has_rounded_mask(ContentMask_ScaledPixels mask);
+float content_mask_alpha(float2 point, ContentMask_ScaledPixels mask);
 float4 over(float4 below, float4 above);
 float radians(float degrees);
 
@@ -76,7 +81,7 @@ float quad_depth(uint quad_id, float depth_scale) {
 bool is_opaque_rectangle(Quad quad) {
   return quad.background.tag == 0u && quad.background.solid.a >= 1.0 &&
          !has_rounded_corners(quad.corner_radii) &&
-         !has_border(quad.border_widths);
+         !has_border(quad.border_widths) && !has_rounded_mask(quad.content_mask);
 }
 
 vertex QuadFragmentInput quad_vertex(
@@ -99,7 +104,8 @@ vertex QuadFragmentInput quad_vertex(
       to_device_position_impl(clipped.position, viewport_size);
   device_position.z = quad_depth(quad_id, *depth_scale);
   float4 border_color = hsla_to_rgba(quad.border_color);
-  bool simple = !is_shaped(quad) && quad.background.tag == 0u;
+  bool simple = !is_shaped(quad) && quad.background.tag == 0u &&
+                !has_rounded_mask(quad.content_mask);
   PreparedBackground background = prepare_background(quad.background);
 
   return QuadFragmentInput{
@@ -109,9 +115,7 @@ vertex QuadFragmentInput quad_vertex(
       background};
 }
 
-fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
-                              constant Quad *quads
-                              [[buffer(QuadInputIndex_Quads)]]) {
+float4 quad_color(QuadFragmentInput input, constant Quad *quads) {
   if ((input.quad_id & SIMPLE_PRIMITIVE_FLAG) != 0u) {
     return input.background.color0;
   }
@@ -466,6 +470,16 @@ float quarter_ellipse_sdf(float2 point, float2 radii) {
   return unit_circle_sdf * (radii.x + radii.y) * -0.5;
 }
 
+fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
+                              constant Quad *quads
+                              [[buffer(QuadInputIndex_Quads)]]) {
+  float4 color = quad_color(input, quads);
+  if ((input.quad_id & SIMPLE_PRIMITIVE_FLAG) == 0u) {
+    color.a *= content_mask_alpha(input.position.xy, quads[input.quad_id].content_mask);
+  }
+  return color;
+}
+
 struct OpaqueQuadFragmentInput {
   float4 position [[position]];
   float4 color [[flat]];
@@ -629,6 +643,7 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
     alpha *= saturate(0.5 - element_distance);
   }
 
+  alpha *= content_mask_alpha(input.position.xy, shadow.content_mask);
   return input.color * float4(1., 1., 1., alpha);
 }
 
@@ -653,7 +668,9 @@ vertex UnderlineFragmentInput underline_vertex(
   return UnderlineFragmentInput{
       device_position,
       color,
-      underline_id | (underline.wavy == 0u ? SIMPLE_PRIMITIVE_FLAG : 0u)};
+      underline_id | (underline.wavy == 0u && !has_rounded_mask(underline.content_mask)
+                          ? SIMPLE_PRIMITIVE_FLAG
+                          : 0u)};
 }
 
 fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
@@ -667,6 +684,10 @@ fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
   }
 
   Underline underline = underlines[input.underline_id];
+  float mask_alpha = content_mask_alpha(input.position.xy, underline.content_mask);
+  if (underline.wavy == 0u) {
+    return input.color * float4(1., 1., 1., mask_alpha);
+  }
   float half_thickness = underline.thickness * 0.5;
   float2 origin =
       float2(underline.bounds.origin.x, underline.bounds.origin.y);
@@ -684,7 +705,7 @@ fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
   float distance_from_bottom_border = distance_in_pixels + half_thickness;
   float alpha = saturate(
       0.5 - max(-distance_from_bottom_border, distance_from_top_border));
-  return input.color * float4(1., 1., 1., alpha);
+  return input.color * float4(1., 1., 1., alpha * mask_alpha);
 }
 
 struct MonochromeSpriteFragmentInput {
@@ -692,6 +713,7 @@ struct MonochromeSpriteFragmentInput {
   float2 tile_position;
   float4 color [[flat]];
   float4 clip_distance;
+  uint sprite_id [[flat]];
 };
 
 vertex MonochromeSpriteFragmentInput monochrome_sprite_vertex(
@@ -713,7 +735,8 @@ vertex MonochromeSpriteFragmentInput monochrome_sprite_vertex(
       device_position,
       tile_position,
       color,
-      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
+      {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w},
+      sprite_id};
 }
 
 fragment float4 monochrome_sprite_fragment(
@@ -729,7 +752,8 @@ fragment float4 monochrome_sprite_fragment(
   float4 sample =
       atlas_texture.sample(atlas_texture_sampler, input.tile_position);
   float4 color = input.color;
-  color.a *= sample.a;
+  color.a *= sample.a *
+      content_mask_alpha(input.position.xy, sprites[input.sprite_id].content_mask);
   return color;
 }
 
@@ -755,8 +779,8 @@ vertex PolychromeSpriteFragmentInput polychrome_sprite_vertex(
       to_device_position_impl(clipped.position, viewport_size);
   float2 tile_position =
       to_tile_position(clipped.unit_vertex, sprite.tile, atlas_size);
-  bool simple =
-      !has_rounded_corners(sprite.corner_radii) && sprite.grayscale == 0u;
+  bool simple = !has_rounded_corners(sprite.corner_radii) &&
+                sprite.grayscale == 0u && !has_rounded_mask(sprite.content_mask);
   return PolychromeSpriteFragmentInput{
       device_position,
       tile_position,
@@ -785,7 +809,8 @@ fragment float4 polychrome_sprite_fragment(
   }
   float distance =
       quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
-  color.a *= input.opacity * saturate(0.5 - distance);
+  color.a *= input.opacity * saturate(0.5 - distance) *
+             content_mask_alpha(input.position.xy, sprite.content_mask);
   return color;
 }
 
@@ -821,8 +846,11 @@ vertex PathTileFragmentInput path_tile_vertex(
   return PathTileFragmentInput{
       to_device_position_impl(position, viewport_size),
       tile_id,
-      float4(tile.curves_top_left.x, tile.curves_top_left.y,
-             tile.curves_bottom_right.x, tile.curves_bottom_right.y),
+      // A rounded mask cuts the inside of the curves too, so no pixel takes the solid fast path.
+      has_rounded_mask(paint.content_mask)
+          ? float4(-INFINITY, -INFINITY, INFINITY, INFINITY)
+          : float4(tile.curves_top_left.x, tile.curves_top_left.y,
+                   tile.curves_bottom_right.x, tile.curves_bottom_right.y),
       prepare_background(paint.color)};
 }
 
@@ -939,17 +967,22 @@ fragment float4 path_tile_fragment(
 
   float4 color = background_color(input.background, paint.color,
                                   paint.bounds, input.position.xy);
-  return float4(color.rgb, color.a * coverage);
+  return float4(color.rgb, color.a * coverage *
+                               content_mask_alpha(input.position.xy, paint.content_mask));
 }
 
 struct SurfaceVertexOutput {
   float4 position [[position]];
   float2 texture_position;
+  float4 mask_rect [[flat]];
+  float4 mask_radii [[flat]];
 };
 
 struct SurfaceFragmentInput {
   float4 position [[position]];
   float2 texture_position;
+  float4 mask_rect [[flat]];
+  float4 mask_radii [[flat]];
 };
 
 vertex SurfaceVertexOutput surface_vertex(
@@ -970,7 +1003,9 @@ vertex SurfaceVertexOutput surface_vertex(
   float2 texture_position = clipped.unit_vertex;
   return SurfaceVertexOutput{
       device_position,
-      texture_position};
+      texture_position,
+      content_mask_rect(surface.content_mask),
+      content_mask_radii(surface.content_mask)};
 }
 
 fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
@@ -988,7 +1023,9 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
       y_texture.sample(texture_sampler, input.texture_position).r,
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
 
-  return ycbcrToRGBTransform * ycbcr;
+  float4 color = ycbcrToRGBTransform * ycbcr;
+  color.a *= rounded_rect_alpha(input.position.xy, input.mask_rect, input.mask_radii);
+  return color;
 }
 
 struct NativeViewVertexOutput {
@@ -1030,7 +1067,8 @@ fragment float4 video_surface_fragment(SurfaceFragmentInput input [[stage_in]],
   float r = y + 1.5748 * cb_cr.y;
   float g = y - 0.1873 * cb_cr.x - 0.4681 * cb_cr.y;
   float b = y + 1.8556 * cb_cr.x;
-  return float4(saturate(float3(r, g, b)), 1.0);
+  return float4(saturate(float3(r, g, b)),
+                rounded_rect_alpha(input.position.xy, input.mask_rect, input.mask_radii));
 }
 
 // One plane of `32BGRA`, sampled as it is: a remote surface's IOSurface.
@@ -1038,7 +1076,9 @@ fragment float4 bgra_surface_fragment(SurfaceFragmentInput input [[stage_in]],
                                       texture2d<float> bgra_texture
                                       [[texture(SurfaceInputIndex_YTexture)]]) {
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
-  return bgra_texture.sample(texture_sampler, input.texture_position);
+  float4 color = bgra_texture.sample(texture_sampler, input.texture_position);
+  color.a *= rounded_rect_alpha(input.position.xy, input.mask_rect, input.mask_radii);
+  return color;
 }
 
 float4 hsla_to_rgba(Hsla hsla) {
@@ -1203,6 +1243,41 @@ float pick_corner_radius(float2 center_to_point, Corners_ScaledPixels corner_rad
       return corner_radii.bottom_right;
     }
   }
+}
+
+// The coverage of a rounded rectangle at a point (`rect`: x, y, width, height; `radii`: top left,
+// top right, bottom right, bottom left), a pixel of antialiasing along its edge; 1 with no radius,
+// which the content mask's rectangle clips already.
+float rounded_rect_alpha(float2 point, float4 rect, float4 radii) {
+  if (all(radii == float4(0.))) {
+    return 1.;
+  }
+  float2 half_size = rect.zw / 2.;
+  float2 center_to_point = point - (rect.xy + half_size);
+  float corner_radius = center_to_point.x < 0.
+      ? (center_to_point.y < 0. ? radii.x : radii.w)
+      : (center_to_point.y < 0. ? radii.y : radii.z);
+  float2 corner_center_to_point = fabs(center_to_point) - half_size + corner_radius;
+  return saturate(0.5 - quad_sdf_impl(corner_center_to_point, corner_radius));
+}
+
+float4 content_mask_rect(ContentMask_ScaledPixels mask) {
+  return float4(mask.rounded.origin.x, mask.rounded.origin.y, mask.rounded.size.width,
+                mask.rounded.size.height);
+}
+
+float4 content_mask_radii(ContentMask_ScaledPixels mask) {
+  return float4(mask.corner_radii.top_left, mask.corner_radii.top_right,
+                mask.corner_radii.bottom_right, mask.corner_radii.bottom_left);
+}
+
+bool has_rounded_mask(ContentMask_ScaledPixels mask) {
+  return any(content_mask_radii(mask) != float4(0.));
+}
+
+// How much of a point a content mask's rounded rectangle keeps: 1 inside, 0 past its curve.
+float content_mask_alpha(float2 point, ContentMask_ScaledPixels mask) {
+  return rounded_rect_alpha(point, content_mask_rect(mask), content_mask_radii(mask));
 }
 
 // Signed distance of the point to the quad's border - positive outside the
