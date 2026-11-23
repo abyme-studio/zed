@@ -1,15 +1,14 @@
-//! The activity's `SurfaceView` as GPUI's one window, drawn through `gpui_wgpu`.
+//! A view's `SurfaceView` as a GPUI window, drawn through `gpui_wgpu`.
 //!
-//! The surface comes and goes with the activity: `GameActivity` hands over an `ANativeWindow` on
-//! `InitWindow` and takes it back on `TerminateWindow` (on pause, on rotation). The renderer is made
-//! with the first surface and outlives the rest: a lost surface only unconfigures it, keeping its
-//! device and atlas, and the next one is configured in its place.
+//! The surface comes and goes with the view: it hands over an `ANativeWindow` on `surfaceCreated`
+//! and takes it back on `surfaceDestroyed` (on stop, on rotation). The renderer is made with the
+//! first surface and outlives the rest: a lost surface only unconfigures it, keeping its device and
+//! atlas, and the next one is configured in its place.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use android_activity::AndroidApp;
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas,
     Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
@@ -53,9 +52,8 @@ impl HasDisplayHandle for RawWindow {
 
 pub(crate) struct AndroidWindowState {
     pub(crate) handle: AnyWindowHandle,
-    /// A window beyond the activity's own, on a surface the app hands over (others.rs): its id.
+    /// A window beyond the activity's own, on a view of an activity of its own (others.rs): its id.
     pub(crate) other: Option<u64>,
-    app: AndroidApp,
     gpu_context: GpuContext,
     renderer: RefCell<Option<WgpuRenderer>>,
     /// A window beyond the activity's own opens before its surface comes: GPUI takes its atlas at
@@ -98,8 +96,8 @@ pub(crate) struct AndroidWindowState {
 }
 
 /// The activity's density as GPUI's scale: Android's dp is 1/160 inch.
-pub(crate) fn scale_of(app: &AndroidApp) -> f32 {
-    app.config().density().map_or(1.0, |dpi| dpi as f32 / 160.0)
+pub(crate) fn scale_of() -> f32 {
+    super::host::config().scale
 }
 
 impl AndroidWindowState {
@@ -119,12 +117,11 @@ impl AndroidWindowState {
         }
     }
 
-    /// Takes the activity's new surface: makes the renderer on the first, configures it on the
-    /// rest. Called from the event loop on `InitWindow`.
+    /// Takes the view's new surface: makes the renderer on the first, configures it on the rest.
     pub(crate) fn attach(&self, window: NativeWindow) -> anyhow::Result<()> {
         let raw = RawWindow(window);
         self.device_size.set(size(DevicePixels(raw.0.width().max(1)), DevicePixels(raw.0.height().max(1))));
-        self.scale.set(scale_of(&self.app));
+        self.scale.set(scale_of());
         let config = self.surface_config();
         {
             let mut renderer = self.renderer.borrow_mut();
@@ -148,7 +145,7 @@ impl AndroidWindowState {
         Ok(())
     }
 
-    /// Lets go of the surface before `TerminateWindow` returns: the renderer stops using it and
+    /// Lets go of the surface before `surfaceDestroyed` returns: the renderer stops using it and
     /// keeps the rest.
     pub(crate) fn detach(&self) {
         if let Some(renderer) = self.renderer.borrow_mut().as_mut() {
@@ -158,15 +155,20 @@ impl AndroidWindowState {
         self.set_visibility(WindowVisibility::Hidden);
     }
 
+    /// The surface's size in device pixels.
+    pub(crate) fn device_size(&self) -> Size<DevicePixels> {
+        self.device_size.get()
+    }
+
     pub(crate) fn has_surface(&self) -> bool {
         self.native.borrow().is_some()
     }
 
-    /// The surface's size or density changed (`WindowResized`, `ConfigChanged`).
+    /// The surface's size or density changed (`surfaceChanged`, a configuration change).
     pub(crate) fn surface_resized(&self) {
         let Some(raw) = self.native.borrow().clone() else { return };
         let new = size(DevicePixels(raw.0.width().max(1)), DevicePixels(raw.0.height().max(1)));
-        let scale = scale_of(&self.app);
+        let scale = scale_of();
         if new == self.device_size.get() && scale == self.scale.get() {
             return;
         }
@@ -249,12 +251,14 @@ impl AndroidWindowState {
         self.back_enabled.get() && self.back_callback.with(|callback| callback()).is_some()
     }
 
-    /// Where this window's keyboard is: the activity's own, or the app's view for it.
-    pub(crate) fn keyboard(&self) -> super::text_input::Keyboard<'_> {
-        match self.other {
-            Some(id) => super::text_input::Keyboard::Other(id),
-            None => super::text_input::Keyboard::Activity(&self.app),
-        }
+    /// The window's id with the app: 0 for the activity's own.
+    pub(crate) fn id(&self) -> u64 {
+        self.other.unwrap_or(0)
+    }
+
+    /// The view that holds this window's keyboard text.
+    pub(crate) fn keyboard(&self) -> super::text_input::Keyboard {
+        super::text_input::Keyboard(self.id())
     }
 
     /// Whether a back press goes to GPUI rather than to the system.
@@ -282,17 +286,16 @@ impl AndroidWindow {
     pub(crate) fn new(
         handle: AnyWindowHandle,
         _params: WindowParams,
-        app: AndroidApp,
         gpu_context: GpuContext,
         other: Option<u64>,
+        surface: Option<NativeWindow>,
     ) -> anyhow::Result<Self> {
         // The GPU context is the first window's, made with its surface.
         let atlas = other.and_then(|_| gpu_context.borrow().as_ref().map(|c| Arc::new(WgpuAtlas::from_context(c))));
         let state = Rc::new(AndroidWindowState {
             handle,
             other,
-            scale: Cell::new(scale_of(&app)),
-            app: app.clone(),
+            scale: Cell::new(scale_of()),
             gpu_context,
             renderer: RefCell::new(None),
             atlas,
@@ -326,12 +329,10 @@ impl AndroidWindow {
             back_callback: CallbackSlot::default(),
             a11y: RefCell::new(None),
         });
-        // The platform starts GPUI once the activity has a surface, so the renderer and its atlas
-        // exist before GPUI asks for them. Another window's surface comes later, from the app.
-        if other.is_none()
-            && let Some(window) = app.native_window()
-        {
-            state.attach(window)?;
+        // The platform starts GPUI once the activity's view has a surface, so the renderer and its
+        // atlas exist before GPUI asks for them. Another window's surface comes later, from the app.
+        if let Some(surface) = surface {
+            state.attach(surface)?;
         }
         Ok(Self(state))
     }
@@ -380,7 +381,7 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn appearance(&self) -> WindowAppearance {
-        super::platform::appearance(&self.0.app)
+        super::platform::appearance()
     }
 
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
@@ -554,7 +555,7 @@ impl PlatformWindow for AndroidWindow {
         if self.0.other.is_some() {
             return;
         }
-        self.0.a11y.replace(super::a11y::A11y::new(&self.0.app, callbacks));
+        self.0.a11y.replace(super::a11y::A11y::new(callbacks));
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
@@ -580,15 +581,11 @@ impl PlatformWindow for AndroidWindow {
     }
 
     fn show_soft_keyboard(&self) {
-        if self.0.other.is_none() {
-            self.0.app.show_soft_input(true);
-        }
+        super::others::keyboard(self.0.id(), super::others::Keyboard::Show);
     }
 
     fn hide_soft_keyboard(&self) {
-        if self.0.other.is_none() {
-            self.0.app.hide_soft_input(true);
-        }
+        super::others::keyboard(self.0.id(), super::others::Keyboard::Hide);
     }
 }
 

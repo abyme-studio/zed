@@ -1,51 +1,27 @@
-//! The `GameActivity`-backed implementation of GPUI's platform on Android.
+//! GPUI's platform on Android, on the app's own `Activity` and view: the app calls `start` from its
+//! activity, and every window, the activity's own (id 0) and each after it, tells GPUI of its
+//! surface, input and lifecycle through one queue (`others`).
 
 mod a11y;
 mod clipboard;
 mod dispatcher;
 mod display;
+mod host;
 mod input;
-mod insets;
 pub mod others;
 mod platform;
 mod text_input;
 mod window;
 
 use std::cell::{Cell, RefCell};
-use std::sync::OnceLock;
-
-use android_activity::AndroidApp;
-
 pub(crate) use display::AndroidDisplay;
+pub use host::{activity, assets, files_dir, start, vm};
 pub use platform::AndroidPlatform;
 pub(crate) use window::AndroidWindow;
 
-static APP: OnceLock<AndroidApp> = OnceLock::new();
-
-/// Hands GPUI the activity `android_main` was given. Call it first thing in `android_main`, before
-/// `gpui_platform::application()`.
-///
-/// A process holds one GPUI app, bound to the first activity's thread: GameActivity polls each
-/// activity on a thread of its own, and GPUI cannot move. So the app's manifest lists every
-/// `configChanges` (the activity is never made again for a change of configuration), `run` ends the
-/// process when its activity is destroyed, and a second activity in the same process ends it too,
-/// so the system starts the activity again in a fresh one.
-pub fn set_android_app(app: AndroidApp) {
-    if APP.set(app).is_err() {
-        log::error!("gpui_android: a second activity in one process; ending it for a fresh start");
-        std::process::exit(0);
-    }
-}
-
-pub(crate) fn android_app() -> AndroidApp {
-    APP.get()
-        .cloned()
-        .expect("gpui_android: call set_android_app(app) in android_main before starting GPUI")
-}
-
-/// Returns the native platform implementation for Android.
+/// Returns the native platform implementation for Android. On GPUI's thread, after `start`.
 pub fn current_platform(_headless: bool) -> std::rc::Rc<dyn gpui::Platform> {
-    std::rc::Rc::new(AndroidPlatform::new(android_app()))
+    std::rc::Rc::new(AndroidPlatform::new())
 }
 
 /// A callback that may be replaced or withdrawn while it runs, as gpui_ios keeps them.

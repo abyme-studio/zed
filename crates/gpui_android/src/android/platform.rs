@@ -1,20 +1,18 @@
-//! GPUI's `Platform` on an Android `GameActivity`.
+//! GPUI's `Platform` on the app's own Android `Activity`.
 //!
-//! `run` is the activity's event loop on the thread `android_main` runs on: it waits in
-//! `poll_events`, woken by the activity, by GPUI's dispatcher and by Choreographer's frame
-//! callbacks; handles the activity's lifecycle; drains GPUI's main-thread queue; and draws a frame
-//! on each vsync while a window has a surface. GPUI is started once the activity has its first
-//! surface, so a window's renderer exists before GPUI draws. Windows after the first are on
-//! surfaces the app hands over (others.rs).
+//! `run` is the event loop on GPUI's thread (`host::start`): it waits on the thread's looper, woken
+//! by the views and the activity (others.rs), by GPUI's dispatcher and by Choreographer's frame
+//! callbacks; handles what they told; drains GPUI's main-thread queue; and draws a frame on each
+//! vsync while a window has a surface. GPUI is started once the activity's view has its first
+//! surface, so a window's renderer exists before GPUI draws. Every window, the activity's own
+//! (id 0) and each after it, is on a view the app hands over.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use android_activity::{AndroidApp, AndroidAppWaker, MainEvent, PollEvent};
 use anyhow::anyhow;
 use futures::channel::oneshot;
 use gpui::{
@@ -27,36 +25,26 @@ use gpui::{
 use gpui_wgpu::{CosmicTextSystem, GpuContext};
 
 use super::window::{AndroidWindowState, scale_of};
-use super::others::{self, Told};
+use super::others::{self, Life, NativeWindow, Told};
 use super::{AndroidDisplay, AndroidWindow, CallbackSlot, dispatcher, input};
 
 /// Set by Choreographer's frame callback, read by the event loop after the wake it sends.
 static FRAME_DUE: AtomicBool = AtomicBool::new(false);
 /// Whether a frame callback is posted and has not run.
 static FRAME_POSTED: AtomicBool = AtomicBool::new(false);
-static WAKER: OnceLock<AndroidAppWaker> = OnceLock::new();
 
 unsafe extern "C" fn on_frame(_frame_time_nanos: std::os::raw::c_long, _data: *mut std::ffi::c_void) {
     FRAME_POSTED.store(false, Ordering::SeqCst);
     FRAME_DUE.store(true, Ordering::SeqCst);
-    if let Some(waker) = WAKER.get() {
-        waker.wake();
-    }
+    super::host::wake();
 }
 
-/// Wakes the event loop from any thread: something is queued for GPUI's thread (others.rs).
-pub(crate) fn wake() {
-    if let Some(waker) = WAKER.get() {
-        waker.wake();
-    }
-}
-
-/// Asks Choreographer for the next vsync, once. On the looper thread, whose looper it posts to.
+/// Asks Choreographer for the next vsync, once. On GPUI's thread, whose looper it posts to.
 fn post_frame() {
     if FRAME_POSTED.swap(true, Ordering::SeqCst) {
         return;
     }
-    // SAFETY: called on the activity's looper thread, which has a looper; `on_frame` touches only
+    // SAFETY: called on GPUI's thread, which has a looper; `on_frame` touches only
     // statics.
     unsafe {
         let choreographer = ndk_sys::AChoreographer_getInstance();
@@ -81,11 +69,8 @@ fn is_emulator() -> bool {
 }
 
 /// The system's light or dark mode.
-pub(crate) fn appearance(app: &AndroidApp) -> WindowAppearance {
-    match app.config().ui_mode_night() {
-        ndk::configuration::UiModeNight::Yes => WindowAppearance::Dark,
-        _ => WindowAppearance::Light,
-    }
+pub(crate) fn appearance() -> WindowAppearance {
+    if super::host::config().dark { WindowAppearance::Dark } else { WindowAppearance::Light }
 }
 
 struct AndroidKeyboardLayout;
@@ -103,21 +88,21 @@ impl PlatformKeyboardLayout for AndroidKeyboardLayout {
 pub struct AndroidPlatform(Rc<AndroidPlatformState>);
 
 pub(crate) struct AndroidPlatformState {
-    app: AndroidApp,
     main_queue: RefCell<PriorityQueueReceiver<RunnableVariant>>,
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<CosmicTextSystem>,
     gpu_context: GpuContext,
     window: RefCell<Weak<AndroidWindowState>>,
-    /// The windows beyond the activity's own, by id, each on a surface the app hands over.
+    /// The activity's view's surface, while GPUI has not opened its first window to take it.
+    main_surface: RefCell<Option<NativeWindow>>,
+    /// The windows beyond the activity's own, by id, each on a view of an activity of its own.
     others: RefCell<Vec<(u64, Weak<AndroidWindowState>)>>,
     next_other: Cell<u64>,
     /// The activity's own surface's top left on the screen, as last told: kept for its window,
     /// which may open after the app first tells it.
     main_origin: Cell<Point<DevicePixels>>,
     destroyed: Cell<bool>,
-    input_available: Cell<bool>,
     appearance: Cell<WindowAppearance>,
     /// The item GPUI last wrote, kept for its metadata: the system clipboard holds text alone.
     clipboard: RefCell<Option<ClipboardItem>>,
@@ -129,34 +114,32 @@ pub(crate) struct AndroidPlatformState {
 }
 
 impl AndroidPlatform {
-    /// Made on the thread `android_main` runs on, which becomes GPUI's main thread.
-    pub fn new(app: AndroidApp) -> Self {
+    /// Made on GPUI's thread (`host::start`), which becomes its main thread.
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         if is_emulator() && std::env::var_os("WGPU_BACKEND").is_none() {
             log::info!("gpui_android: an emulator; drawing with GL, as its Vulkan hangs or fails");
             // SAFETY: GPUI has not started; no other thread reads the environment yet.
             unsafe { std::env::set_var("WGPU_BACKEND", "gl") };
         }
-        let waker = app.create_waker();
-        let _ = WAKER.set(waker.clone());
-        let (dispatcher, main_queue) = dispatcher::AndroidDispatcher::new(waker);
+        let (dispatcher, main_queue) = dispatcher::AndroidDispatcher::new();
         let dispatcher = Arc::new(dispatcher);
         let text_system = Arc::new(CosmicTextSystem::new_without_system_fonts("Roboto"));
         // fontdb knows no font folder on Android.
         text_system.load_fonts_dir("/system/fonts");
-        let appearance = appearance(&app);
+        let appearance = appearance();
         Self(Rc::new(AndroidPlatformState {
-            app,
             main_queue: RefCell::new(main_queue),
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system,
             gpu_context: GpuContext::default(),
             window: RefCell::new(Weak::new()),
+            main_surface: RefCell::new(None),
             others: RefCell::new(Vec::new()),
             next_other: Cell::new(1),
             main_origin: Cell::new(Point::default()),
             destroyed: Cell::new(false),
-            input_available: Cell::new(false),
             appearance: Cell::new(appearance),
             clipboard: RefCell::new(None),
             quit_callback: CallbackSlot::default(),
@@ -180,39 +163,48 @@ impl AndroidPlatformState {
         self.window().into_iter().chain(others.iter().filter_map(|(_, w)| w.upgrade())).collect()
     }
 
-    fn other(&self, id: u64) -> Option<Rc<AndroidWindowState>> {
+    /// Window `id`: 0 is the activity's own.
+    fn by_id(&self, id: u64) -> Option<Rc<AndroidWindowState>> {
+        if id == 0 {
+            return self.window();
+        }
         self.others.borrow().iter().find(|(i, _)| *i == id).and_then(|(_, w)| w.upgrade())
     }
 
-    /// What an app's activity told of a window beyond the activity's own (others.rs).
+    /// What a view or the activity told (others.rs).
     fn told(&self, told: Told) {
-        let scale = scale_of(&self.app);
+        let scale = scale_of();
         match told {
-            Told::Surface(id, native) => {
-                if let Some(window) = self.other(id)
-                    && let Err(e) = window.attach(native)
-                {
-                    log::error!("gpui_android: could not draw on window {id}'s surface: {e:#}");
+            Told::Surface(id, native) => match self.by_id(id) {
+                Some(window) => {
+                    if let Err(e) = window.attach(native) {
+                        log::error!("gpui_android: could not draw on window {id}'s surface: {e:#}");
+                    }
                 }
-            }
+                // The activity's surface before GPUI opened its window: kept for it.
+                None if id == 0 => drop(self.main_surface.replace(Some(native))),
+                None => {}
+            },
             Told::Gone(id, done) => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     window.detach();
+                } else if id == 0 {
+                    self.main_surface.replace(None);
                 }
                 let _ = done.send(());
             }
             Told::Resized(id) => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     window.surface_resized();
                 }
             }
-            Told::Touch { id, pointer, phase, x, y, pressure } => {
-                if let Some(window) = self.other(id) {
-                    input::touch(&window, pointer, phase, x, y, pressure, scale, input::Contact::FINGER);
+            Told::Touch { id, pointer, phase, x, y, pressure, tool, major, minor } => {
+                if let Some(window) = self.by_id(id) {
+                    input::touch(&window, pointer, phase, x, y, pressure, scale, input::Contact::of(tool, major, minor));
                 }
             }
             Told::Insets(id, safe, ime) => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     window.set_insets(others::as_insets(safe, ime, scale));
                 }
             }
@@ -221,43 +213,42 @@ impl AndroidPlatformState {
                 if id == 0 {
                     self.main_origin.set(origin);
                 }
-                let window = if id == 0 { self.window() } else { self.other(id) };
-                if let Some(window) = window {
+                if let Some(window) = self.by_id(id) {
                     window.set_origin(origin);
                 }
             }
             Told::Focus(id, focused) => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     window.set_active(focused);
+                }
+                if id == 0 {
+                    self.lifecycle(if focused { AppLifecyclePhase::Active } else { AppLifecyclePhase::Inactive });
                 }
             }
             Told::Ended(id) => {
-                if let Some(window) = self.other(id) {
+                if id != 0
+                    && let Some(window) = self.by_id(id)
+                {
                     window.detach();
                     window.end();
                 }
             }
             Told::Key { id, code, meta, down, repeat, typed, bare } => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     input::told_key(&window, code, meta, down, repeat, typed, bare);
                 }
             }
             Told::Text(id, state) => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     window.text_input.apply(&state, &window.input_handler);
                 }
             }
             Told::Action(id) => {
-                if let Some(window) = self.other(id) {
+                if let Some(window) = self.by_id(id) {
                     input::action(&window);
                 }
             }
-        }
-    }
-
-    fn read_insets(&self, window: &AndroidWindowState) {
-        if let Some(insets) = super::insets::read(&self.app, scale_of(&self.app)) {
-            window.set_insets(insets);
+            Told::Life(life) => self.life(life),
         }
     }
 
@@ -265,79 +256,34 @@ impl AndroidPlatformState {
         self.lifecycle_callback.with(|callback| callback(phase));
     }
 
-    /// One event from the activity, inside `poll_events`: a surface must be let go of before its
-    /// `TerminateWindow` returns.
-    fn handle(&self, event: MainEvent<'_>) {
-        match event {
-            MainEvent::InitWindow { .. } => {
-                if let (Some(window), Some(native)) = (self.window(), self.app.native_window())
-                    && let Err(e) = window.attach(native)
-                {
-                    log::error!("gpui_android: could not draw on the activity's surface: {e:#}");
-                }
-                if let Some(window) = self.window() {
-                    self.read_insets(&window);
-                }
+    /// The activity's lifecycle.
+    fn life(&self, life: Life) {
+        match life {
+            Life::Start | Life::Resume => self.lifecycle(AppLifecyclePhase::Foreground),
+            Life::Pause => self.lifecycle(AppLifecyclePhase::Inactive),
+            Life::Stop => self.lifecycle(AppLifecyclePhase::Background),
+            Life::LowMemory => {
+                self.memory_warning_callback.with(|callback| callback());
             }
-            MainEvent::TerminateWindow { .. } => {
-                if let Some(window) = self.window() {
-                    window.detach();
-                }
-            }
-            MainEvent::WindowResized { .. } | MainEvent::ContentRectChanged { .. } => {
-                if let Some(window) = self.window() {
+            Life::Configuration => {
+                super::host::reread_config();
+                let appearance = appearance();
+                let changed = self.appearance.replace(appearance) != appearance;
+                for window in self.windows() {
                     window.surface_resized();
-                    self.read_insets(&window);
-                }
-            }
-            MainEvent::InsetsChanged { .. } => {
-                if let Some(window) = self.window() {
-                    self.read_insets(&window);
-                }
-            }
-            MainEvent::RedrawNeeded { .. } => {
-                if let Some(window) = self.window() {
-                    window.request_frame();
-                }
-            }
-            MainEvent::ConfigChanged { .. } => {
-                let appearance = appearance(&self.app);
-                if let Some(window) = self.window() {
-                    window.surface_resized();
-                    if self.appearance.replace(appearance) != appearance {
+                    if changed {
                         window.appearance_changed();
                     }
                 }
                 self.displays_changed_callback.with(|callback| callback());
             }
-            MainEvent::GainedFocus => {
-                if let Some(window) = self.window() {
-                    window.set_active(true);
-                }
-                self.lifecycle(AppLifecyclePhase::Active);
-            }
-            MainEvent::LostFocus => {
-                if let Some(window) = self.window() {
-                    window.set_active(false);
-                }
-                self.lifecycle(AppLifecyclePhase::Inactive);
-            }
-            MainEvent::Start => self.lifecycle(AppLifecyclePhase::Foreground),
-            MainEvent::Resume { .. } => self.lifecycle(AppLifecyclePhase::Foreground),
-            MainEvent::Pause => self.lifecycle(AppLifecyclePhase::Inactive),
-            MainEvent::Stop => self.lifecycle(AppLifecyclePhase::Background),
-            MainEvent::LowMemory => {
-                self.memory_warning_callback.with(|callback| callback());
-            }
-            MainEvent::InputAvailable => self.input_available.set(true),
-            MainEvent::Destroy => {
+            Life::Destroy => {
                 self.quit_callback.with(|callback| callback());
                 for window in self.windows() {
                     window.close();
                 }
                 self.destroyed.set(true);
             }
-            _ => {}
         }
     }
 }
@@ -361,27 +307,14 @@ impl Platform for AndroidPlatform {
 
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
         let state = self.0.clone();
-        let app = state.app.clone();
         let mut launch = Some(on_finish_launching);
         while !state.destroyed.get() {
-            app.poll_events(None, |event| {
-                if let PollEvent::Main(event) = event {
-                    state.handle(event);
-                }
-            });
-            if launch.is_some() && app.native_window().is_some() {
-                // GPUI opens its windows here, once there is a surface to draw on.
-                (launch.take().expect("checked"))();
-            }
-            if state.input_available.replace(false)
-                && let Some(window) = state.window()
-            {
-                input::drain(&app, &window, scale_of(&app));
-            } else if state.input_available.get() {
-                state.input_available.set(false);
-            }
             for told in others::drain() {
                 state.told(told);
+            }
+            if launch.is_some() && state.main_surface.borrow().is_some() {
+                // GPUI opens its windows here, once there is a surface to draw on.
+                (launch.take().expect("checked"))();
             }
             dispatcher::drain(&mut state.main_queue.borrow_mut());
             let windows = state.windows();
@@ -393,18 +326,23 @@ impl Platform for AndroidPlatform {
             if windows.iter().any(|w| w.has_surface()) {
                 post_frame();
             }
+            if state.destroyed.get() {
+                break;
+            }
+            // Woken by a view, the activity, the dispatcher, or a frame callback run inside.
+            super::host::wait();
         }
         // Whatever GPUI queued as it closed.
         dispatcher::drain(&mut state.main_queue.borrow_mut());
-        // GPUI cannot start again on the next activity's thread (see `set_android_app`). `_exit`, not
-        // `exit`: the C++ glue's static destructors would run on this thread with the main thread's
-        // JNIEnv, which CheckJNI aborts on, while the main thread waits in `onDestroy` (an ANR).
+        // GPUI cannot start again in this process (`host::start` runs `main` once): the process
+        // ends, and Android starts the activity in a fresh one. `_exit`, not `exit`: static
+        // destructors would run on this thread while the main thread waits in `onDestroy`.
         // SAFETY: ends the process; nothing after it runs.
         unsafe { libc::_exit(0) };
     }
 
     fn quit(&self) {
-        // An activity finishes itself through its Java side; GameActivity's is not reached yet.
+        // An activity finishes itself through its Java side, which GPUI does not reach yet.
         log::warn!("gpui_android: an app cannot quit itself; the system ends it");
     }
 
@@ -425,9 +363,19 @@ impl Platform for AndroidPlatform {
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        let window = self.0.app.native_window()?;
-        let scale = scale_of(&self.0.app);
-        Some(Rc::new(AndroidDisplay::new(window.width() as f32 / scale, window.height() as f32 / scale)))
+        let scale = scale_of();
+        let (width, height) = match self.0.window() {
+            Some(window) => {
+                let size = window.device_size();
+                (size.width.0, size.height.0)
+            }
+            None => {
+                let surface = self.0.main_surface.borrow();
+                let surface = surface.as_ref()?;
+                (surface.width(), surface.height())
+            }
+        };
+        Some(Rc::new(AndroidDisplay::new(width as f32 / scale, height as f32 / scale)))
     }
 
     fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
@@ -443,17 +391,18 @@ impl Platform for AndroidPlatform {
         handle: AnyWindowHandle,
         options: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
-        // The activity's own surface is the first window; each after it is the app's to show
-        // (others.rs), on a surface it hands over.
+        // The activity's own view is the first window; each after it is the app's to show
+        // (others.rs), on a view it hands over.
         if self.0.window().is_some() {
             let id = self.0.next_other.get();
             self.0.next_other.set(id + 1);
-            let window = AndroidWindow::new(handle, options, self.0.app.clone(), self.0.gpu_context.clone(), Some(id))?;
+            let window = AndroidWindow::new(handle, options, self.0.gpu_context.clone(), Some(id), None)?;
             self.0.others.borrow_mut().push((id, Rc::downgrade(&window.0)));
             others::opened(id);
             return Ok(Box::new(window));
         }
-        let window = AndroidWindow::new(handle, options, self.0.app.clone(), self.0.gpu_context.clone(), None)?;
+        let surface = self.0.main_surface.borrow_mut().take();
+        let window = AndroidWindow::new(handle, options, self.0.gpu_context.clone(), None, surface)?;
         window.0.set_origin(self.0.main_origin.get());
         self.0.window.replace(Rc::downgrade(&window.0));
         Ok(Box::new(window))
@@ -542,7 +491,7 @@ impl Platform for AndroidPlatform {
     }
 
     fn app_path(&self) -> Result<PathBuf> {
-        self.0.app.internal_data_path().ok_or_else(|| anyhow!("the activity has no data folder"))
+        Ok(super::host::files_dir())
     }
 
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf> {
@@ -562,12 +511,12 @@ impl Platform for AndroidPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        super::clipboard::item(&self.0.app, self.0.clipboard.borrow().as_ref())
+        super::clipboard::item(self.0.clipboard.borrow().as_ref())
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         if let Some(text) = item.text() {
-            super::clipboard::write(&self.0.app, &text);
+            super::clipboard::write(&text);
         }
         self.0.clipboard.replace(Some(item));
     }

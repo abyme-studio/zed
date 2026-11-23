@@ -1,30 +1,32 @@
-//! Windows beyond the activity's own, each on a surface the app hands over.
+//! Every window's view, and the activity's lifecycle, as GPUI's thread hears them.
 //!
-//! `GameActivity` has one surface, GPUI's first window. Each window GPUI opens after it is a window
-//! of the app's own: GPUI's thread tells the app (`on_opened`), which shows an activity of its own
-//! holding a `SurfaceView`, beside the app in split screen or free in a free-window mode. That
-//! activity tells GPUI, from Android's main thread, of its surface, its size, its touches, its
-//! insets, its focus and its end. Each is queued here and handled on GPUI's thread at its next wake.
-//! A surface going away waits until GPUI has let go of it, as `TerminateWindow` does.
+//! Each window GPUI opens is on a view of the app's (`AbymeView`): the activity's own window is id 0,
+//! and each one after it is a window of the app's own: GPUI's thread tells the app (`on_opened`),
+//! which shows an activity of its own holding a view, beside the app in split screen or free in a
+//! free-window mode. Each view tells GPUI, from Android's main thread, of its surface, its size, its
+//! touches, its insets, its focus and its end, and the activity of its lifecycle (`life`). Each is
+//! queued here and handled on GPUI's thread at its next wake. A surface going away waits until GPUI
+//! has let go of it.
 //!
 //! Its keys and the IME's text come the same way (`key`, `text`, `action`), and GPUI says what its
-//! keyboard should show back to the app's view for it (`on_keyboard`), as GameTextInput is told for
-//! the activity's own. It has no TalkBack tree yet: that is the activity's own.
+//! keyboard should show back to the view (`on_keyboard`). Only the activity's own window has a
+//! TalkBack tree yet.
 
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use android_activity::input::{TextInputState, TextSpan};
 use gpui::{Edges, TouchPhase, WindowInsets, px};
 pub use ndk::native_window::NativeWindow;
+pub use super::text_input::{TextInputState, TextSpan};
 
 /// What the app's activity told of window `id`, for GPUI's thread.
 pub(crate) enum Told {
     Surface(u64, NativeWindow),
     Gone(u64, mpsc::Sender<()>),
     Resized(u64),
-    Touch { id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32 },
+    /// A pointer of a touch, with `MotionEvent`'s tool type and the contact's axes in device pixels.
+    Touch { id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, tool: i32, major: f32, minor: f32 },
     /// The bars and cutout, then the keyboard, in device pixels: left, top, right, bottom.
     Insets(u64, [i32; 4], [i32; 4]),
     Focus(u64, bool),
@@ -39,6 +41,39 @@ pub(crate) enum Told {
     Text(u64, TextInputState),
     /// The keyboard's action key.
     Action(u64),
+    /// The activity's lifecycle (`life`).
+    Life(Life),
+}
+
+/// What the activity went through, as `Windows.life`'s kind says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Life {
+    Start,
+    Resume,
+    Pause,
+    Stop,
+    /// It finished (Back, or closed): the app ends.
+    Destroy,
+    LowMemory,
+    /// A rotation, a resize, a theme or a density: the configuration is read again.
+    Configuration,
+}
+
+impl Life {
+    /// `Windows.life`'s `kind`: 0 start, 1 resume, 2 pause, 3 stop, 4 destroy, 5 low memory,
+    /// 6 configuration.
+    pub fn from_kind(kind: i32) -> Option<Life> {
+        Some(match kind {
+            0 => Life::Start,
+            1 => Life::Resume,
+            2 => Life::Pause,
+            3 => Life::Stop,
+            4 => Life::Destroy,
+            5 => Life::LowMemory,
+            6 => Life::Configuration,
+            _ => return None,
+        })
+    }
 }
 
 /// What GPUI tells the app's view for a window of what its keyboard should show.
@@ -63,15 +98,15 @@ const LET_GO: Duration = Duration::from_secs(2);
 
 fn tell(told: Told) {
     TOLD.lock().unwrap_or_else(|e| e.into_inner()).push(told);
-    super::platform::wake();
+    super::host::wake();
 }
 
 pub(crate) fn drain() -> Vec<Told> {
     std::mem::take(&mut *TOLD.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
-/// Called on GPUI's thread with each window GPUI opens beyond the activity's own: the app shows an
-/// activity for it, which tells its surface with `surface(id, …)`.
+/// Called on GPUI's thread with each window GPUI opens beyond the activity's own (ids from 1): the
+/// app shows an activity for it, whose view tells its surface with `surface(id, …)`.
 pub fn on_opened(opened: impl Fn(u64) + Send + Sync + 'static) {
     let _ = OPENED.set(Box::new(opened));
 }
@@ -107,7 +142,7 @@ pub(crate) fn closed(id: u64) {
     }
 }
 
-/// Window `id`'s activity has a surface (`surfaceCreated`), from any thread.
+/// Window `id`'s view has a surface (`surfaceCreated`), from any thread. Id 0 is the activity's own.
 pub fn surface(id: u64, window: NativeWindow) {
     tell(Told::Surface(id, window));
 }
@@ -126,9 +161,16 @@ pub fn resized(id: u64) {
     tell(Told::Resized(id));
 }
 
-/// A touch on window `id`, in its surface's pixels.
-pub fn touch(id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32) {
-    tell(Told::Touch { id, pointer, phase, x, y, pressure });
+/// A touch on window `id`, in its surface's pixels: `tool` is `MotionEvent.getToolType`, `major` and
+/// `minor` its contact's axes (`getTouchMajor`, `getTouchMinor`), 0 when not reported.
+#[allow(clippy::too_many_arguments)]
+pub fn touch(id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, tool: i32, major: f32, minor: f32) {
+    tell(Told::Touch { id, pointer, phase, x, y, pressure, tool, major, minor });
+}
+
+/// The activity's lifecycle (`Windows.life`), from any thread.
+pub fn life(life: Life) {
+    tell(Told::Life(life));
 }
 
 /// Window `id`'s insets, in device pixels (left, top, right, bottom): the system bars and cutout,
@@ -143,7 +185,7 @@ pub fn placed(id: u64, x: i32, y: i32) {
     tell(Told::Placed(id, x, y));
 }
 
-/// Window `id`'s activity gained or lost focus.
+/// Window `id`'s window gained or lost focus.
 pub fn focus(id: u64, focused: bool) {
     tell(Told::Focus(id, focused));
 }
