@@ -2,7 +2,7 @@
 //! activity, and every window, the activity's own (id 0) and each after it, tells GPUI of its
 //! surface, input and lifecycle through one queue (`others`).
 
-mod a11y;
+pub mod a11y;
 mod clipboard;
 mod dispatcher;
 mod display;

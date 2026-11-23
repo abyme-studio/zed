@@ -9,8 +9,8 @@
 //! has let go of it.
 //!
 //! Its keys, the IME's edits and files dropped on it come the same way (`key`, `edit`, `action`, `dropped`), and GPUI says what its
-//! keyboard should show back to the view, and where its caret is (`on_keyboard`). Only the activity's own window has a
-//! TalkBack tree yet.
+//! keyboard should show back to the view, and where its caret is (`on_keyboard`). Each window's
+//! view answers TalkBack and autofill from the window's tree (a11y.rs).
 
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
