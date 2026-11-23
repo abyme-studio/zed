@@ -1454,6 +1454,7 @@ fn pointer_info(event: &web_sys::PointerEvent) -> gpui::PointerInfo {
         width: event.width() as f32,
         height: event.height() as f32,
         pressure,
+        tilt: None,
     }
 }
 

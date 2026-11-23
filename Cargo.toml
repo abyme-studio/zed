@@ -729,6 +729,7 @@ objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
     "UIEvent",
     "UIGeometry",
     "UIGestureRecognizer",
+    "UIHoverGestureRecognizer",
     "UIPanGestureRecognizer",
     "UIScreenEdgePanGestureRecognizer",
     "UIInterface",

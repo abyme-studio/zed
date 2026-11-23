@@ -5,9 +5,10 @@ use gpui::{
     ScrollSource, TouchId, TouchPhase, px,
 };
 use objc2_core_foundation::CGPoint;
+use objc2_foundation::NSObjectProtocol;
 use objc2_ui_kit::{
     UIGestureRecognizerState, UIKeyModifierFlags, UIPanGestureRecognizer, UIRectEdge,
-    UIEvent, UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UITouchType, UIView,
+    UIEvent, UIHoverGestureRecognizer, UIScreenEdgePanGestureRecognizer, UITouch, UITouchPhase, UITouchType, UIView,
 };
 
 /// A release faster than this, in points per second toward going back, commits
@@ -121,14 +122,38 @@ fn modifiers(flags: UIKeyModifierFlags) -> Modifiers {
 
 /// A touch's pointer: Apple Pencil is a pen, a pointer device a mouse, else a finger; the contact a
 /// circle of UIKit's major radius (none for a pen or pointer, which report none).
-pub fn touch_pointer(touch: &UITouch, id: TouchId) -> gpui::PointerInfo {
+pub fn touch_pointer(touch: &UITouch, id: TouchId, view: &UIView) -> gpui::PointerInfo {
     let kind = match touch.r#type() {
         UITouchType::Pencil => gpui::PointerKind::Pen,
         UITouchType::IndirectPointer => gpui::PointerKind::Mouse,
         _ => gpui::PointerKind::Touch,
     };
     let size = if kind == gpui::PointerKind::Touch { (touch.majorRadius() * 2.0) as f32 } else { 0.0 };
-    gpui::PointerInfo { kind, id: id.0, width: size, height: size, pressure: touch_force(touch) }
+    gpui::PointerInfo {
+        kind,
+        id: id.0,
+        width: size,
+        height: size,
+        pressure: touch_force(touch),
+        tilt: touch_tilt(touch, view),
+    }
+}
+
+/// The pointer behind a hover: a Pencil above the glass (iPadOS 16.1, on an
+/// iPad that senses it), with its tilt from iPadOS 16.4, else the trackpad's or
+/// mouse's pointer. A hover's moves are GPUI's mouse moves with no button, so a
+/// pen's hover is a move whose pointer is a pen.
+pub fn hover_pointer(recognizer: &UIHoverGestureRecognizer, view: &UIView) -> gpui::PointerInfo {
+    // UIKit gives a pointer's hover no height: only a Pencil's is above 0.
+    let pencil = recognizer.respondsToSelector(objc2::sel!(zOffset)) && recognizer.zOffset() > 0.0;
+    if !pencil {
+        return gpui::PointerInfo { kind: gpui::PointerKind::Mouse, ..Default::default() };
+    }
+    let tilt = recognizer.respondsToSelector(objc2::sel!(altitudeAngle)).then(|| gpui::PenTilt {
+        altitude: recognizer.altitudeAngle() as f32,
+        azimuth: recognizer.azimuthAngleInView(Some(view)) as f32,
+    });
+    gpui::PointerInfo { kind: gpui::PointerKind::Pen, tilt, ..Default::default() }
 }
 
 /// A pencil's tilt; none for a finger. UIKit's angles are the DOM's: altitude

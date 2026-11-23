@@ -541,7 +541,7 @@ impl IosWindowState {
     fn handle_touch_sample(&self, touch: &UITouch, ui_event: Option<&UIEvent>, id: TouchId) {
         let position = touch_location_in_view(touch, &self.view);
         self.mouse_position.set(position);
-        self.pointer.set(Some(touch_pointer(touch, id)));
+        self.pointer.set(Some(touch_pointer(touch, id, &self.view)));
 
         let event = TouchEvent {
             id,

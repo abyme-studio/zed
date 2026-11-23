@@ -3072,6 +3072,7 @@ unsafe fn mouse_pointer(native_event: *mut AnyObject) -> gpui::PointerInfo {
         width: 0.0,
         height: 0.0,
         pressure: Some(pressure.clamp(0.0, 1.0)),
+        tilt: None,
     }
 }
 

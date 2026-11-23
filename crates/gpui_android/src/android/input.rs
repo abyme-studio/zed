@@ -102,6 +102,7 @@ pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: 
         width: contact.major.max(0.0) / scale,
         height: contact.minor.max(0.0) / scale,
         pressure: force,
+        tilt: None,
     }));
     window.input_callback.with(|callback| callback(PlatformInput::Touch(event)));
 }

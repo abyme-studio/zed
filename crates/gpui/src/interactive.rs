@@ -138,6 +138,9 @@ pub struct PointerInfo {
     pub height: f32,
     /// Normalized pressure in `0.0..=1.0`, if the hardware reports it.
     pub pressure: Option<f32>,
+    /// A pen's tilt, on the glass or hovering above it, if the hardware
+    /// reports it.
+    pub tilt: Option<PenTilt>,
 }
 
 /// A pen's tilt, in radians, as the DOM's `altitudeAngle` and `azimuthAngle`.
