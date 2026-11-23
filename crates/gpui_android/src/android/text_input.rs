@@ -1,7 +1,6 @@
-//! The soft keyboard and IMEs, through GameActivity's own `InputConnection` (GameTextInput), or,
-//! for a window beyond the activity's own, through the app's view for it (`others::on_keyboard`).
+//! The soft keyboard and IMEs, through the app's view for each window (`others::on_keyboard`).
 //!
-//! GameTextInput keeps an editable copy of the text: its text, selection and composing region.
+//! The view keeps an editable copy of the text: its text, selection and composing region.
 //! We fill it from the focused input's text around the caret, and when the IME changes it, apply
 //! the difference to GPUI's input handler: a composing region as marked text, the rest as a plain
 //! replacement. Offsets on both sides are UTF-16, as Java's and GPUI's are.
@@ -9,8 +8,6 @@
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
-use android_activity::AndroidApp;
-use android_activity::input::{ImeOptions, InputType, TextInputState, TextSpan};
 use crate::android::CallbackSlot;
 use gpui::{
     Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration, TextInputMode,
@@ -20,7 +17,74 @@ use gpui::{
 /// How much of the document, in UTF-16 units, the IME sees around the caret.
 const WINDOW: usize = 4096;
 
-/// What GameTextInput holds, as we last set or read it.
+/// A range of the text the view holds, in UTF-16 units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The text the view holds for the focused input: its text, selection and composing region.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextInputState {
+    pub text: String,
+    pub selection: TextSpan,
+    pub compose_region: Option<TextSpan>,
+}
+
+/// `EditorInfo.inputType`'s bits, as Android's `InputType` names them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct InputType(u32);
+
+impl InputType {
+    const TYPE_CLASS_TEXT: Self = Self(0x1);
+    const TYPE_CLASS_NUMBER: Self = Self(0x2);
+    const TYPE_CLASS_PHONE: Self = Self(0x3);
+    const TYPE_NUMBER_FLAG_DECIMAL: Self = Self(0x2000);
+    const TYPE_TEXT_VARIATION_EMAIL_ADDRESS: Self = Self(0x20);
+    const TYPE_TEXT_VARIATION_URI: Self = Self(0x10);
+    const TYPE_TEXT_FLAG_CAP_CHARACTERS: Self = Self(0x1000);
+    const TYPE_TEXT_FLAG_CAP_WORDS: Self = Self(0x2000);
+    const TYPE_TEXT_FLAG_CAP_SENTENCES: Self = Self(0x4000);
+    const TYPE_TEXT_FLAG_AUTO_CORRECT: Self = Self(0x8000);
+    const TYPE_TEXT_FLAG_MULTI_LINE: Self = Self(0x20000);
+    const TYPE_TEXT_FLAG_NO_SUGGESTIONS: Self = Self(0x80000);
+
+    fn empty() -> Self {
+        Self(0)
+    }
+
+    fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::ops::BitOr for InputType {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl std::ops::BitOrAssign for InputType {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+/// `EditorInfo.IME_ACTION_*`.
+mod ime {
+    pub const UNSPECIFIED: u32 = 0;
+    pub const NONE: u32 = 1;
+    pub const GO: u32 = 2;
+    pub const SEARCH: u32 = 3;
+    pub const SEND: u32 = 4;
+    pub const NEXT: u32 = 5;
+    pub const DONE: u32 = 6;
+    pub const PREVIOUS: u32 = 7;
+}
+
+/// What the view holds, as we last set or read it.
 #[derive(Clone, PartialEq, Eq)]
 struct Mirror {
     /// Where `text` starts in the document.
@@ -30,54 +94,25 @@ struct Mirror {
     compose: Option<Range<usize>>,
 }
 
-/// Where the keyboard is: the activity's own, or the app's view for window `id` (others.rs).
+/// Window `id`'s view, which holds the keyboard's text for it (others.rs).
 #[derive(Clone, Copy)]
-pub(crate) enum Keyboard<'a> {
-    Activity(&'a AndroidApp),
-    Other(u64),
-}
+pub(crate) struct Keyboard(pub u64);
 
-impl Keyboard<'_> {
+impl Keyboard {
     fn show(self) {
-        match self {
-            Keyboard::Activity(app) => app.show_soft_input(false),
-            Keyboard::Other(id) => super::others::keyboard(id, super::others::Keyboard::Show),
-        }
+        super::others::keyboard(self.0, super::others::Keyboard::Show);
     }
 
     fn hide(self) {
-        match self {
-            Keyboard::Activity(app) => app.hide_soft_input(false),
-            Keyboard::Other(id) => super::others::keyboard(id, super::others::Keyboard::Hide),
-        }
+        super::others::keyboard(self.0, super::others::Keyboard::Hide);
     }
 
-    fn editor(self, input_type: InputType, action: android_activity::input::TextInputAction) {
-        match self {
-            Keyboard::Activity(app) => app.set_ime_editor_info(input_type, action, ImeOptions::IME_FLAG_NO_FULLSCREEN),
-            Keyboard::Other(id) => {
-                use android_activity::input::TextInputAction as Ime;
-                // `EditorInfo.IME_ACTION_*`.
-                let action = match action {
-                    Ime::None => 1,
-                    Ime::Go => 2,
-                    Ime::Search => 3,
-                    Ime::Send => 4,
-                    Ime::Next => 5,
-                    Ime::Done => 6,
-                    Ime::Previous => 7,
-                    _ => 0,
-                };
-                super::others::keyboard(id, super::others::Keyboard::Editor { input_type: input_type.bits(), action })
-            }
-        }
+    fn editor(self, input_type: InputType, action: u32) {
+        super::others::keyboard(self.0, super::others::Keyboard::Editor { input_type: input_type.bits(), action });
     }
 
     fn state(self, state: TextInputState) {
-        match self {
-            Keyboard::Activity(app) => app.set_text_input_state(state),
-            Keyboard::Other(id) => super::others::keyboard(id, super::others::Keyboard::State(state)),
-        }
+        super::others::keyboard(self.0, super::others::Keyboard::State(state));
     }
 }
 
@@ -92,7 +127,7 @@ pub(crate) struct TextInput {
 impl TextInput {
     pub(crate) fn state_changed(
         &self,
-        keyboard: Keyboard<'_>,
+        keyboard: Keyboard,
         handlers: &CallbackSlot<PlatformInputHandler>,
         change: TextInputStateChange,
     ) {
@@ -114,7 +149,7 @@ impl TextInput {
         }
     }
 
-    pub(crate) fn set_configuration(&self, keyboard: Keyboard<'_>, configuration: TextInputConfiguration) {
+    pub(crate) fn set_configuration(&self, keyboard: Keyboard, configuration: TextInputConfiguration) {
         if *self.configuration.borrow() == configuration {
             return;
         }
@@ -141,28 +176,27 @@ impl TextInput {
                 input_type |= InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             }
         }
-        use android_activity::input::TextInputAction as Ime;
         let action = match configuration.input_action {
-            TextInputAction::Unspecified => Ime::Unspecified,
+            TextInputAction::Unspecified => ime::UNSPECIFIED,
             TextInputAction::Enter => {
                 if text {
                     input_type |= InputType::TYPE_TEXT_FLAG_MULTI_LINE;
                 }
-                Ime::None
+                ime::NONE
             }
-            TextInputAction::Done => Ime::Done,
-            TextInputAction::Go => Ime::Go,
-            TextInputAction::Next => Ime::Next,
-            TextInputAction::Previous => Ime::Previous,
-            TextInputAction::Search => Ime::Search,
-            TextInputAction::Send => Ime::Send,
+            TextInputAction::Done => ime::DONE,
+            TextInputAction::Go => ime::GO,
+            TextInputAction::Next => ime::NEXT,
+            TextInputAction::Previous => ime::PREVIOUS,
+            TextInputAction::Search => ime::SEARCH,
+            TextInputAction::Send => ime::SEND,
         };
         keyboard.editor(input_type, action);
         self.configuration.replace(configuration);
     }
 
-    /// Sets GameTextInput from the focused input, unless it already holds the same.
-    fn push(&self, keyboard: Keyboard<'_>, handlers: &CallbackSlot<PlatformInputHandler>) {
+    /// Sets the view's text from the focused input, unless it already holds the same.
+    fn push(&self, keyboard: Keyboard, handlers: &CallbackSlot<PlatformInputHandler>) {
         let read = handlers.with(read_mirror).flatten();
         let Some(mirror) = read else { return };
         if self.mirror.borrow().as_ref() == Some(&mirror) {
@@ -226,7 +260,7 @@ impl TextInput {
     }
 }
 
-/// The focused input's text around its caret, as GameTextInput should hold it.
+/// The focused input's text around its caret, as the view should hold it.
 fn read_mirror(handler: &mut PlatformInputHandler) -> Option<Mirror> {
     if !handler.query_accepts_focused_text_input() {
         return None;

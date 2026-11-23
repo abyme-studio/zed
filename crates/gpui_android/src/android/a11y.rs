@@ -1,21 +1,19 @@
 //! GPUI's accessibility tree, given to TalkBack through AccessKit's Android adapter. The adapter
 //! injects its own `AccessibilityDelegate` (a class from AccessKit's embedded dex, so the app needs no
-//! Java of its own) into GameActivity's `SurfaceView`, the view GPUI draws in. GPUI's node bounds
+//! Java of its own) into the app's view for the activity's window, the first child of its content. GPUI's node bounds
 //! are in device pixels from the window's origin; the view fills the window, edge to edge, so they
 //! need no change.
 
 use accesskit::{ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
 use accesskit_android::InjectingAdapter;
-use android_activity::AndroidApp;
-use jni::JavaVM;
 use jni::objects::{JObject, JValue};
 
 pub(crate) struct A11y(InjectingAdapter);
 
 impl A11y {
     /// Injects the adapter into the activity's view; `None`, logged, when the view cannot be found.
-    pub(crate) fn new(app: &AndroidApp, callbacks: gpui::A11yCallbacks) -> Option<Self> {
-        match make(app, callbacks) {
+    pub(crate) fn new(callbacks: gpui::A11yCallbacks) -> Option<Self> {
+        match make(callbacks) {
             Ok(adapter) => Some(Self(adapter)),
             Err(e) => {
                 log::warn!("gpui_android: no screen reader support, the activity's view was not found: {e}");
@@ -29,14 +27,12 @@ impl A11y {
     }
 }
 
-fn make(app: &AndroidApp, callbacks: gpui::A11yCallbacks) -> jni::errors::Result<InjectingAdapter> {
-    // SAFETY: the VM and activity pointers are android-activity's, valid while the activity is.
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+fn make(callbacks: gpui::A11yCallbacks) -> jni::errors::Result<InjectingAdapter> {
     // The adapter reaches the VM from this thread on every update, so it stays attached.
-    let mut env = vm.attach_current_thread_permanently()?;
+    let mut env = super::host::vm().attach_current_thread_permanently()?;
     env.with_local_frame(16, |env| {
-        // SAFETY: a global reference android-activity holds for the activity's life; not deleted here.
-        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        // SAFETY: a global reference host.rs keeps, never deleted.
+        let activity = unsafe { JObject::from_raw(super::host::activity()) };
         let view = surface_view(env, &activity)?;
         let activation = Activation(callbacks.activation);
         let action = Action(callbacks.action);
@@ -44,7 +40,7 @@ fn make(app: &AndroidApp, callbacks: gpui::A11yCallbacks) -> jni::errors::Result
     })
 }
 
-/// GameActivity's `SurfaceView`: its content view, the only child of `android.R.id.content`.
+/// The app's view for the activity's window: the only child of `android.R.id.content`.
 fn surface_view<'local>(
     env: &mut jni::JNIEnv<'local>,
     activity: &JObject,

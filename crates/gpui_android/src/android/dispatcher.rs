@@ -1,13 +1,11 @@
-//! GPUI's executor on Android: main-thread work runs on the activity's looper thread (the thread
-//! `android_main` runs on), woken through `AndroidAppWaker`; background work runs on a pool of
-//! worker threads; timers on one thread of their own.
+//! GPUI's executor on Android: main-thread work runs on GPUI's thread (`host::start`), woken through
+//! its looper; background work runs on a pool of worker threads; timers on one thread of their own.
 
 use std::collections::BinaryHeap;
 use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use android_activity::AndroidAppWaker;
 use gpui::{
     PlatformDispatcher, Priority, PriorityQueueReceiver, PriorityQueueSender, RunnableVariant,
     profiler,
@@ -99,7 +97,6 @@ impl Timers {
 
 pub(crate) struct AndroidDispatcher {
     main_sender: PriorityQueueSender<RunnableVariant>,
-    waker: AndroidAppWaker,
     background_sender: PriorityQueueSender<RunnableVariant>,
     timers: std::sync::Arc<Timers>,
     _threads: Vec<thread::JoinHandle<()>>,
@@ -107,9 +104,9 @@ pub(crate) struct AndroidDispatcher {
 }
 
 impl AndroidDispatcher {
-    /// Made on the looper thread, which becomes GPUI's main thread. Answers the dispatcher and
-    /// the main thread's queue, which the event loop drains after each wake.
-    pub fn new(waker: AndroidAppWaker) -> (Self, PriorityQueueReceiver<RunnableVariant>) {
+    /// Made on GPUI's thread, which becomes its main thread. Answers the dispatcher and the main
+    /// thread's queue, which the event loop drains after each wake.
+    pub fn new() -> (Self, PriorityQueueReceiver<RunnableVariant>) {
         let (main_sender, main_receiver) = PriorityQueueReceiver::new();
         let (background_sender, background_receiver) = PriorityQueueReceiver::new();
         let count = thread::available_parallelism().map_or(MIN_THREADS, |n| n.get().max(MIN_THREADS));
@@ -136,7 +133,6 @@ impl AndroidDispatcher {
         );
         let dispatcher = Self {
             main_sender,
-            waker,
             background_sender,
             timers,
             _threads: threads,
@@ -166,7 +162,7 @@ impl PlatformDispatcher for AndroidDispatcher {
 
     fn dispatch_on_main_thread(&self, runnable: RunnableVariant, priority: Priority) {
         match self.main_sender.send(priority, runnable) {
-            Ok(()) => self.waker.wake(),
+            Ok(()) => super::host::wake(),
             // The runnable may hold a future that is !Send, and this may be another thread: it is
             // leaked, as the main loop has ended and the app with it.
             Err(e) => std::mem::forget(e),

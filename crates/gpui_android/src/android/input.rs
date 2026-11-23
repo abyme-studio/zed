@@ -1,10 +1,6 @@
-//! The activity's input events as GPUI's: touches as `PlatformInput::Touch`, hardware keys as key
-//! down and up with the character the device's key map gives.
+//! A view's input as GPUI's: touches as `PlatformInput::Touch`, keys as key down and up with the
+//! characters the view read from Android's `KeyEvent`.
 
-use android_activity::input::{
-    InputEvent, KeyAction, KeyEvent, Keycode, MetaState, MotionAction, MotionEvent, Pointer, ToolType,
-};
-use android_activity::{AndroidApp, InputStatus};
 use gpui::{
     KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, PlatformInput, Point, TouchEvent, TouchId,
     TouchPhase, px,
@@ -12,28 +8,46 @@ use gpui::{
 
 use super::window::AndroidWindowState;
 
-/// Delivers every pending input event to `window`. Called when the activity says input is
-/// available.
-pub(crate) fn drain(app: &AndroidApp, window: &AndroidWindowState, scale: f32) {
-    let Ok(mut events) = app.input_events_iter() else { return };
-    loop {
-        let more = events.next(|event| match event {
-            InputEvent::MotionEvent(motion) => motion_event(window, motion, scale),
-            InputEvent::KeyEvent(key) => key_event(app, window, key),
-            InputEvent::TextEvent(state) => {
-                window.text_input.apply(state, &window.input_handler);
-                InputStatus::Handled
-            }
-            InputEvent::TextAction(_) => {
-                action(window);
-                InputStatus::Handled
-            }
-            _ => InputStatus::Unhandled,
-        });
-        if !more {
-            break;
-        }
-    }
+/// Android's `KeyEvent.KEYCODE_*` that GPUI names or treats apart.
+mod code {
+    pub const BACK: u32 = 4;
+    pub const DPAD_UP: u32 = 19;
+    pub const DPAD_DOWN: u32 = 20;
+    pub const DPAD_LEFT: u32 = 21;
+    pub const DPAD_RIGHT: u32 = 22;
+    pub const ALT_LEFT: u32 = 57;
+    pub const ALT_RIGHT: u32 = 58;
+    pub const SHIFT_LEFT: u32 = 59;
+    pub const SHIFT_RIGHT: u32 = 60;
+    pub const TAB: u32 = 61;
+    pub const SPACE: u32 = 62;
+    pub const ENTER: u32 = 66;
+    pub const DEL: u32 = 67;
+    pub const PAGE_UP: u32 = 92;
+    pub const PAGE_DOWN: u32 = 93;
+    pub const ESCAPE: u32 = 111;
+    pub const FORWARD_DEL: u32 = 112;
+    pub const CTRL_LEFT: u32 = 113;
+    pub const CTRL_RIGHT: u32 = 114;
+    pub const CAPS_LOCK: u32 = 115;
+    pub const META_LEFT: u32 = 117;
+    pub const META_RIGHT: u32 = 118;
+    pub const FUNCTION: u32 = 119;
+    pub const MOVE_HOME: u32 = 122;
+    pub const MOVE_END: u32 = 123;
+    pub const INSERT: u32 = 124;
+    pub const F1: u32 = 131;
+    pub const F12: u32 = 142;
+    pub const NUMPAD_ENTER: u32 = 160;
+}
+
+/// Android's `KeyEvent.META_*_ON`.
+mod meta {
+    pub const SHIFT: u32 = 0x1;
+    pub const ALT: u32 = 0x2;
+    pub const FUNCTION: u32 = 0x8;
+    pub const CTRL: u32 = 0x1000;
+    pub const META: u32 = 0x10000;
 }
 
 /// The keyboard's action key: GPUI binds it as enter.
@@ -49,12 +63,11 @@ pub(crate) fn action(window: &AndroidWindowState) {
     });
 }
 
-/// A key told from another window's view (others.rs), with the characters its view read from it.
+/// A key told from a window's view (others.rs): `typed` and `bare` are the characters it types with
+/// its meta state and with none (0 for none).
 pub(crate) fn told_key(window: &AndroidWindowState, code: u32, meta: u32, down: bool, repeat: i32, typed: u32, bare: u32) {
-    let meta = MetaState(meta);
-    let character = |m: MetaState| char::from_u32(if m.0 == 0 { bare } else { typed }).filter(|c| *c != '\0');
-    let action = if down { KeyAction::Down } else { KeyAction::Up };
-    key(window, Keycode::from(code), meta, action, repeat, &character);
+    let character = |c: u32| char::from_u32(c).filter(|c| *c != '\0');
+    key(window, code, meta, down, repeat, character(typed), character(bare));
 }
 
 fn position(x: f32, y: f32, scale: f32) -> Point<gpui::Pixels> {
@@ -71,16 +84,14 @@ pub(crate) struct Contact {
 }
 
 impl Contact {
-    /// A finger of unknown size: what a touch told from another window carries.
-    pub(crate) const FINGER: Contact = Contact { kind: gpui::PointerKind::Touch, major: 0.0, minor: 0.0 };
-
-    fn of(p: &Pointer<'_>) -> Contact {
-        let kind = match p.tool_type() {
-            ToolType::Stylus | ToolType::Eraser => gpui::PointerKind::Pen,
-            ToolType::Mouse => gpui::PointerKind::Mouse,
+    /// `MotionEvent.getToolType`'s tool (1 finger, 2 stylus, 3 mouse, 4 eraser) and its axes.
+    pub(crate) fn of(tool: i32, major: f32, minor: f32) -> Contact {
+        let kind = match tool {
+            2 | 4 => gpui::PointerKind::Pen,
+            3 => gpui::PointerKind::Mouse,
             _ => gpui::PointerKind::Touch,
         };
-        Contact { kind, major: p.touch_major(), minor: p.touch_minor() }
+        Contact { kind, major, minor }
     }
 }
 
@@ -104,162 +115,91 @@ pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: 
     window.input_callback.with(|callback| callback(PlatformInput::Touch(event)));
 }
 
-fn motion_event(window: &AndroidWindowState, motion: &MotionEvent<'_>, scale: f32) -> InputStatus {
-    let index = motion.pointer_index();
-    match motion.action() {
-        MotionAction::Down | MotionAction::PointerDown => {
-            let p = motion.pointer_at_index(index);
-            touch(window, p.pointer_id(), TouchPhase::Started, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
-        }
-        MotionAction::Up | MotionAction::PointerUp => {
-            let p = motion.pointer_at_index(index);
-            touch(window, p.pointer_id(), TouchPhase::Ended, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
-        }
-        MotionAction::Move => {
-            for p in motion.pointers() {
-                touch(window, p.pointer_id(), TouchPhase::Moved, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
-            }
-        }
-        MotionAction::Cancel => {
-            for p in motion.pointers() {
-                touch(window, p.pointer_id(), TouchPhase::Cancelled, p.x(), p.y(), p.pressure(), scale, Contact::of(&p));
-            }
-        }
-        _ => return InputStatus::Unhandled,
-    }
-    InputStatus::Handled
-}
-
-fn modifiers(meta: MetaState) -> Modifiers {
+fn modifiers(state: u32) -> Modifiers {
+    let on = |bit: u32| state & bit != 0;
     Modifiers {
-        control: meta.ctrl_on(),
-        alt: meta.alt_on(),
-        shift: meta.shift_on(),
-        platform: meta.meta_on(),
-        function: meta.function_on(),
+        control: on(meta::CTRL),
+        alt: on(meta::ALT),
+        shift: on(meta::SHIFT),
+        platform: on(meta::META),
+        function: on(meta::FUNCTION),
     }
 }
 
 /// GPUI's name for a key with no character of its own.
-fn key_name(code: Keycode) -> Option<&'static str> {
-    Some(match code {
-        Keycode::Enter | Keycode::NumpadEnter => "enter",
-        Keycode::Tab => "tab",
-        Keycode::Space => "space",
-        Keycode::Del => "backspace",
-        Keycode::ForwardDel => "delete",
-        Keycode::Escape => "escape",
-        Keycode::DpadUp => "up",
-        Keycode::DpadDown => "down",
-        Keycode::DpadLeft => "left",
-        Keycode::DpadRight => "right",
-        Keycode::MoveHome => "home",
-        Keycode::MoveEnd => "end",
-        Keycode::PageUp => "pageup",
-        Keycode::PageDown => "pagedown",
-        Keycode::Insert => "insert",
-        Keycode::F1 => "f1",
-        Keycode::F2 => "f2",
-        Keycode::F3 => "f3",
-        Keycode::F4 => "f4",
-        Keycode::F5 => "f5",
-        Keycode::F6 => "f6",
-        Keycode::F7 => "f7",
-        Keycode::F8 => "f8",
-        Keycode::F9 => "f9",
-        Keycode::F10 => "f10",
-        Keycode::F11 => "f11",
-        Keycode::F12 => "f12",
+fn key_name(key: u32) -> Option<&'static str> {
+    const F: [&str; 12] = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12"];
+    Some(match key {
+        code::ENTER | code::NUMPAD_ENTER => "enter",
+        code::TAB => "tab",
+        code::SPACE => "space",
+        code::DEL => "backspace",
+        code::FORWARD_DEL => "delete",
+        code::ESCAPE => "escape",
+        code::DPAD_UP => "up",
+        code::DPAD_DOWN => "down",
+        code::DPAD_LEFT => "left",
+        code::DPAD_RIGHT => "right",
+        code::MOVE_HOME => "home",
+        code::MOVE_END => "end",
+        code::PAGE_UP => "pageup",
+        code::PAGE_DOWN => "pagedown",
+        code::INSERT => "insert",
+        code::F1..=code::F12 => F[(key - code::F1) as usize],
         _ => return None,
     })
 }
 
 /// Modifier keys alone change the modifiers, not GPUI's keystrokes.
-fn is_modifier(code: Keycode) -> bool {
+fn is_modifier(key: u32) -> bool {
     matches!(
-        code,
-        Keycode::ShiftLeft
-            | Keycode::ShiftRight
-            | Keycode::CtrlLeft
-            | Keycode::CtrlRight
-            | Keycode::AltLeft
-            | Keycode::AltRight
-            | Keycode::MetaLeft
-            | Keycode::MetaRight
-            | Keycode::Function
-            | Keycode::CapsLock
+        key,
+        code::SHIFT_LEFT
+            | code::SHIFT_RIGHT
+            | code::CTRL_LEFT
+            | code::CTRL_RIGHT
+            | code::ALT_LEFT
+            | code::ALT_RIGHT
+            | code::META_LEFT
+            | code::META_RIGHT
+            | code::FUNCTION
+            | code::CAPS_LOCK
     )
 }
 
-fn key_event(app: &AndroidApp, window: &AndroidWindowState, event: &KeyEvent<'_>) -> InputStatus {
-    // The character the key types, from the device's key map.
-    let character = |meta: MetaState| -> Option<char> {
-        let map = app.device_key_character_map(event.device_id()).ok()?;
-        match map.get(event.key_code(), meta).ok()? {
-            android_activity::input::KeyMapChar::Unicode(c) => Some(c),
-            android_activity::input::KeyMapChar::CombiningAccent(c) => Some(c),
-            android_activity::input::KeyMapChar::None => None,
-        }
-    };
-    key(window, event.key_code(), event.meta_state(), event.action(), event.repeat_count(), &character)
-}
-
-/// A key as GPUI's key down or up; `character` gives what it types with a meta state, with shift for
-/// the key's name as GPUI binds it, without for `key`.
-fn key(
-    window: &AndroidWindowState,
-    code: Keycode,
-    meta: MetaState,
-    action: KeyAction,
-    repeat: i32,
-    character: &dyn Fn(MetaState) -> Option<char>,
-) -> InputStatus {
+/// A key as GPUI's key down or up: `typed` is what it types with its meta state, `bare` with none,
+/// which names the key as GPUI binds it. Whether GPUI took it.
+fn key(window: &AndroidWindowState, key: u32, meta: u32, down: bool, repeat: i32, typed: Option<char>, bare: Option<char>) -> bool {
     let mods = modifiers(meta);
     window.modifiers.set(mods);
-    if code == Keycode::Back {
+    if key == code::BACK {
         // The back key, as the system's back gesture: GPUI's handler when it has one, else the
         // system's own (the activity finishes).
-        if action == KeyAction::Up && window.back() {
-            return InputStatus::Handled;
-        }
-        return if action == KeyAction::Down && window.back_callback_set() {
-            InputStatus::Handled
-        } else {
-            InputStatus::Unhandled
-        };
+        return if down { window.back_callback_set() } else { window.back() };
     }
-    if is_modifier(code) {
+    if is_modifier(key) {
         window.input_callback.with(|callback| {
             callback(PlatformInput::ModifiersChanged(gpui::ModifiersChangedEvent {
                 modifiers: mods,
                 capslock: gpui::Capslock::default(),
             }))
         });
-        return InputStatus::Handled;
+        return true;
     }
-    let (key_name, key_char) = match key_name(code) {
+    let (key_name, key_char) = match key_name(key) {
         Some(name) => (name.to_string(), (name == "space").then(|| " ".to_string())),
         None => {
             // With ctrl or meta held the map types nothing: the bare key names it then.
-            let typed = character(meta);
-            let Some(bare) = character(MetaState(0)).or(typed) else { return InputStatus::Unhandled };
+            let Some(bare) = bare.or(typed) else { return false };
             let key_char = (!mods.control && !mods.platform).then(|| typed.map(|c| c.to_string())).flatten();
             (bare.to_lowercase().to_string(), key_char)
         }
     };
     let keystroke = Keystroke { modifiers: mods, key: key_name, key_char };
-    let input = match action {
-        KeyAction::Down => PlatformInput::KeyDown(KeyDownEvent {
-            keystroke,
-            is_held: repeat > 0,
-            prefer_character_input: false,
-        }),
-        KeyAction::Up => PlatformInput::KeyUp(KeyUpEvent { keystroke }),
-        _ => return InputStatus::Unhandled,
+    let input = if down {
+        PlatformInput::KeyDown(KeyDownEvent { keystroke, is_held: repeat > 0, prefer_character_input: false })
+    } else {
+        PlatformInput::KeyUp(KeyUpEvent { keystroke })
     };
-    let handled = window.input_callback.with(|callback| callback(input));
-    match handled {
-        Some(result) if !result.propagate => InputStatus::Handled,
-        _ => InputStatus::Unhandled,
-    }
+    matches!(window.input_callback.with(|callback| callback(input)), Some(result) if !result.propagate)
 }
