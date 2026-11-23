@@ -258,7 +258,7 @@ impl AndroidWindowState {
 
     /// The view that holds this window's keyboard text.
     pub(crate) fn keyboard(&self) -> super::text_input::Keyboard {
-        super::text_input::Keyboard(self.id())
+        super::text_input::Keyboard { id: self.id(), scale: self.scale.get() }
     }
 
     /// Whether a back press goes to GPUI rather than to the system.

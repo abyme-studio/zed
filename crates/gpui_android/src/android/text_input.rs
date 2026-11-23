@@ -1,9 +1,15 @@
 //! The soft keyboard and IMEs, through the app's view for each window (`others::on_keyboard`).
 //!
 //! The view keeps an editable copy of the text: its text, selection and composing region.
-//! We fill it from the focused input's text around the caret, and when the IME changes it, apply
-//! the difference to GPUI's input handler: a composing region as marked text, the rest as a plain
-//! replacement. Offsets on both sides are UTF-16, as Java's and GPUI's are.
+//! We fill it from the focused input's text around the caret (`Keyboard::State`). The view sends
+//! each edit the IME makes to it, numbered (`Edit`): the run it replaced and what replaced it, then
+//! the selection and composing region. We apply it to GPUI's input handler, a composing region as
+//! marked text, and send the input's text back if it came out otherwise, with the number of the
+//! last edit applied, so the view drops it if it has edited since. Offsets on both sides are UTF-16,
+//! as Java's and GPUI's are.
+//!
+//! We also say where the caret and the composing characters are (`Keyboard::Anchor`), so the IME
+//! can place its candidates and a stylus can write in place.
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
@@ -84,6 +90,18 @@ mod ime {
     pub const PREVIOUS: u32 = 7;
 }
 
+/// One edit of the IME's to the text the view holds (`others::edit`), number `seq`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub seq: u32,
+    /// The run of the text before the edit that `text` replaced; none when only the selection or
+    /// the composing region moved.
+    pub replaced: Option<TextSpan>,
+    pub text: String,
+    pub selection: TextSpan,
+    pub compose_region: Option<TextSpan>,
+}
+
 /// What the view holds, as we last set or read it.
 #[derive(Clone, PartialEq, Eq)]
 struct Mirror {
@@ -95,24 +113,32 @@ struct Mirror {
 }
 
 /// Window `id`'s view, which holds the keyboard's text for it (others.rs).
+/// `scale` turns GPUI's pixels into the view's.
 #[derive(Clone, Copy)]
-pub(crate) struct Keyboard(pub u64);
+pub(crate) struct Keyboard {
+    pub id: u64,
+    pub scale: f32,
+}
 
 impl Keyboard {
     fn show(self) {
-        super::others::keyboard(self.0, super::others::Keyboard::Show);
+        super::others::keyboard(self.id, super::others::Keyboard::Show);
     }
 
     fn hide(self) {
-        super::others::keyboard(self.0, super::others::Keyboard::Hide);
+        super::others::keyboard(self.id, super::others::Keyboard::Hide);
     }
 
     fn editor(self, input_type: InputType, action: u32) {
-        super::others::keyboard(self.0, super::others::Keyboard::Editor { input_type: input_type.bits(), action });
+        super::others::keyboard(self.id, super::others::Keyboard::Editor { input_type: input_type.bits(), action });
     }
 
-    fn state(self, state: TextInputState) {
-        super::others::keyboard(self.0, super::others::Keyboard::State(state));
+    fn state(self, seq: u32, state: TextInputState) {
+        super::others::keyboard(self.id, super::others::Keyboard::State { seq, state });
+    }
+
+    fn anchor(self, rects: Vec<f32>) {
+        super::others::keyboard(self.id, super::others::Keyboard::Anchor(rects));
     }
 }
 
@@ -120,8 +146,12 @@ impl Keyboard {
 pub(crate) struct TextInput {
     mirror: RefCell<Option<Mirror>>,
     configuration: RefCell<TextInputConfiguration>,
-    /// True while we apply the IME's edit, so GPUI's echo of it is not sent back.
+    /// True while we apply the IME's edit, so GPUI's echo of it is not sent back mid-way.
     native_edit: Cell<bool>,
+    /// The number of the view's last edit we applied.
+    seq: Cell<u32>,
+    /// The caret and composing characters we last said (`Keyboard::Anchor`).
+    anchor: RefCell<Vec<f32>>,
 }
 
 impl TextInput {
@@ -139,6 +169,7 @@ impl TextInput {
             }
             TextInputStateChange::FocusLost => {
                 self.mirror.replace(None);
+                self.anchor.replace(Vec::new());
                 keyboard.hide();
             }
             TextInputStateChange::SelectionChanged | TextInputStateChange::ContentChanged => {
@@ -195,68 +226,109 @@ impl TextInput {
         self.configuration.replace(configuration);
     }
 
-    /// Sets the view's text from the focused input, unless it already holds the same.
+    /// Sets the view's text from the focused input, unless it already holds the same, and says
+    /// where its caret is.
     fn push(&self, keyboard: Keyboard, handlers: &CallbackSlot<PlatformInputHandler>) {
         let read = handlers.with(read_mirror).flatten();
         let Some(mirror) = read else { return };
-        if self.mirror.borrow().as_ref() == Some(&mirror) {
-            return;
+        if self.mirror.borrow().as_ref() != Some(&mirror) {
+            keyboard.state(
+                self.seq.get(),
+                TextInputState {
+                    text: String::from_utf16_lossy(&mirror.text),
+                    selection: TextSpan { start: mirror.selection.start, end: mirror.selection.end },
+                    compose_region: mirror.compose.clone().map(|c| TextSpan { start: c.start, end: c.end }),
+                },
+            );
+            self.mirror.replace(Some(mirror));
         }
-        keyboard.state(TextInputState {
-            text: String::from_utf16_lossy(&mirror.text),
-            selection: TextSpan { start: mirror.selection.start, end: mirror.selection.end },
-            compose_region: mirror.compose.clone().map(|c| TextSpan { start: c.start, end: c.end }),
-        });
-        self.mirror.replace(Some(mirror));
+        self.anchor(keyboard, handlers);
     }
 
-    /// Applies the IME's new state to the focused input.
-    pub(crate) fn apply(
-        &self,
-        state: &TextInputState,
-        handlers: &CallbackSlot<PlatformInputHandler>,
-    ) {
-        let new: Vec<u16> = state.text.encode_utf16().collect();
-        let span = |s: TextSpan| s.start.min(s.end).min(new.len())..s.start.max(s.end).min(new.len());
-        let selection = span(state.selection);
-        let compose = state.compose_region.map(span).filter(|c| !c.is_empty());
-        let previous = self.mirror.borrow().clone();
-        let base = previous.as_ref().map_or(0, |m| m.base);
-        let old: &[u16] = previous.as_ref().map_or(&[], |m| &m.text);
-
-        // The changed run: what lies between the common prefix and suffix, widened to cover the
-        // composing region so all of it ends up marked.
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let max_suffix = old.len().min(new.len()) - prefix;
-        let suffix = old.iter().rev().zip(new.iter().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
-        let (mut start, mut new_end) = (prefix, new.len() - suffix);
-        if let Some(c) = &compose {
-            start = start.min(c.start);
-            new_end = new_end.max(c.end);
-        }
-        let old_end = old.len() - (new.len() - new_end);
-        let replaced = base + start..base + old_end;
-        let inserted = String::from_utf16_lossy(&new[start..new_end]);
-        let text_changed = old != new.as_slice();
-        let compose_changed = previous.as_ref().map(|m| &m.compose) != Some(&compose);
+    /// Applies the IME's edit to the focused input, then sends the input's text back if it came out
+    /// otherwise than the view holds (a field that refuses a character, say).
+    pub(crate) fn apply(&self, keyboard: Keyboard, edit: &Edit, handlers: &CallbackSlot<PlatformInputHandler>) {
+        self.seq.set(edit.seq);
+        // An edit to a text we never sent: the view's copy is stale, so send it ours.
+        let Some(previous) = self.mirror.borrow().clone() else {
+            self.push(keyboard, handlers);
+            return;
+        };
+        let base = previous.base;
+        let mut text = previous.text.clone();
+        let inserted: Vec<u16> = edit.text.encode_utf16().collect();
+        let replaced = edit.replaced.map(|r| {
+            let range = r.start.min(r.end).min(text.len())..r.start.max(r.end).min(text.len());
+            text.splice(range.clone(), inserted.iter().copied());
+            range
+        });
+        let span = |s: TextSpan| s.start.min(s.end).min(text.len())..s.start.max(s.end).min(text.len());
+        let selection = span(edit.selection);
+        let compose = edit.compose_region.map(span).filter(|c| !c.is_empty());
+        let in_document = |r: &Range<usize>| base + r.start..base + r.end;
 
         self.native_edit.set(true);
         handlers.with(|handler| {
             if !handler.query_accepts_focused_text_input() {
                 return;
             }
-            if compose.is_some() {
-                // The caret, relative to the marked text.
-                let caret = selection.start.saturating_sub(start)..selection.end.saturating_sub(start);
-                handler.replace_and_mark_text_in_range(Some(replaced.clone()), &inserted, Some(caret));
-            } else if text_changed {
-                handler.replace_text_in_range(Some(replaced.clone()), &inserted);
-            } else if compose_changed {
-                handler.unmark_text();
+            // A run that is not the composing region is replaced first; the composing region is
+            // then marked whole, the caret relative to it.
+            let mut marked_run = false;
+            if let Some(range) = &replaced {
+                let run = range.start..range.start + inserted.len();
+                if compose.as_ref() == Some(&run) {
+                    marked_run = true;
+                    let caret = selection.start.saturating_sub(run.start)..selection.end.saturating_sub(run.start);
+                    handler.replace_and_mark_text_in_range(Some(in_document(range)), &edit.text, Some(caret));
+                } else {
+                    handler.replace_text_in_range(Some(in_document(range)), &edit.text);
+                }
+            }
+            match &compose {
+                Some(c) if !marked_run => {
+                    let caret = selection.start.saturating_sub(c.start)..selection.end.saturating_sub(c.start);
+                    handler.replace_and_mark_text_in_range(
+                        Some(in_document(c)),
+                        &String::from_utf16_lossy(&text[c.clone()]),
+                        Some(caret),
+                    );
+                }
+                Some(_) => {}
+                None if previous.compose.is_some() => handler.unmark_text(),
+                None => {}
+            }
+            // The IME moved the caret alone (a swipe on the space bar): GPUI has no call that only
+            // selects, but an empty replacement of an empty range puts the caret there.
+            if replaced.is_none() && compose.is_none() && selection.is_empty() && selection != previous.selection {
+                handler.replace_text_in_range(Some(in_document(&selection)), "");
             }
         });
         self.native_edit.set(false);
-        self.mirror.replace(Some(Mirror { base, text: new, selection, compose }));
+        self.mirror.replace(Some(Mirror { base, text, selection, compose }));
+        self.push(keyboard, handlers);
+    }
+
+    /// Says where the caret and the composing characters are, when they moved.
+    fn anchor(&self, keyboard: Keyboard, handlers: &CallbackSlot<PlatformInputHandler>) {
+        let Some(mirror) = self.mirror.borrow().clone() else { return };
+        let scale = keyboard.scale;
+        let rects = handlers.with(|handler| {
+            let caret = mirror.base + mirror.selection.end;
+            let at = handler.bounds_for_range(caret..caret)?;
+            let px = |p: gpui::Pixels| f32::from(p) * scale;
+            let mut rects = vec![px(at.left()), px(at.top()), px(at.bottom()), px(at.bottom())];
+            for i in mirror.compose.clone().into_iter().flatten() {
+                let Some(b) = handler.bounds_for_range(mirror.base + i..mirror.base + i + 1) else { break };
+                rects.extend([px(b.left()), px(b.top()), px(b.right()), px(b.bottom())]);
+            }
+            Some(rects)
+        });
+        let Some(Some(rects)) = rects else { return };
+        if *self.anchor.borrow() != rects {
+            keyboard.anchor(rects.clone());
+            self.anchor.replace(rects);
+        }
     }
 }
 
