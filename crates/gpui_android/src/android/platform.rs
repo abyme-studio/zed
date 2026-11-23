@@ -238,9 +238,9 @@ impl AndroidPlatformState {
                     input::told_key(&window, code, meta, down, repeat, typed, bare);
                 }
             }
-            Told::Text(id, state) => {
+            Told::Edit(id, edit) => {
                 if let Some(window) = self.by_id(id) {
-                    window.text_input.apply(&state, &window.input_handler);
+                    window.text_input.apply(window.keyboard(), &edit, &window.input_handler);
                 }
             }
             Told::Action(id) => {
