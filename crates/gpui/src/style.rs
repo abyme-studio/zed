@@ -723,7 +723,7 @@ impl Style {
                     | BackgroundTag::PatternLines
                     | BackgroundTag::PatternDots => color.solid,
 
-                    BackgroundTag::LinearGradient => color
+                    BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => color
                         .colors
                         .first()
                         .map(|stop| stop.color)
