@@ -198,9 +198,19 @@ impl AndroidPlatformState {
                     window.surface_resized();
                 }
             }
-            Told::Touch { id, pointer, phase, x, y, pressure, tool, major, minor } => {
+            Told::Touch { id, pointer, phase, tool, major, minor, samples } => {
                 if let Some(window) = self.by_id(id) {
-                    input::touch(&window, pointer, phase, x, y, pressure, scale, input::Contact::of(tool, major, minor));
+                    input::touch(&window, pointer, phase, &samples, scale, input::Contact::of(tool, major, minor));
+                }
+            }
+            Told::Hover { id, tool, exit, meta, sample } => {
+                if let Some(window) = self.by_id(id) {
+                    input::hover(&window, tool, exit, meta, sample, scale);
+                }
+            }
+            Told::Scroll { id, x, y, h, v, meta } => {
+                if let Some(window) = self.by_id(id) {
+                    input::scroll(&window, x, y, h, v, meta, scale);
                 }
             }
             Told::Insets(id, safe, ime) => {
