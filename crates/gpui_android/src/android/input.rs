@@ -2,7 +2,7 @@
 //! characters the view read from Android's `KeyEvent`.
 
 use gpui::{
-    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, PlatformInput, Point, TouchEvent, TouchId,
+    FileDropEvent, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, PlatformInput, Point, TouchEvent, TouchId,
     TouchPhase, px,
 };
 
@@ -116,6 +116,20 @@ pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: 
         tilt: None,
     }));
     window.input_callback.with(|callback| callback(PlatformInput::Touch(event)));
+}
+
+/// Files dropped at (x, y), in the surface's pixels: GPUI's file drop, entered there with the paths
+/// and submitted, as a desktop's drop from its file manager ends.
+pub(crate) fn dropped(window: &AndroidWindowState, x: f32, y: f32, paths: Vec<std::path::PathBuf>, scale: f32) {
+    if paths.is_empty() {
+        return;
+    }
+    let position = position(x, y, scale);
+    window.mouse_position.set(position);
+    let paths = gpui::ExternalPaths(paths.into());
+    for event in [FileDropEvent::Entered { position, paths }, FileDropEvent::Submit { position }] {
+        window.input_callback.with(|callback| callback(PlatformInput::FileDrop(event)));
+    }
 }
 
 fn modifiers(state: u32) -> Modifiers {

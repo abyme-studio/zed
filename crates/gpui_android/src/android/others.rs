@@ -8,7 +8,7 @@
 //! queued here and handled on GPUI's thread at its next wake. A surface going away waits until GPUI
 //! has let go of it.
 //!
-//! Its keys and the IME's edits come the same way (`key`, `edit`, `action`), and GPUI says what its
+//! Its keys, the IME's edits and a drop of files come the same way (`key`, `edit`, `action`, `dropped`), and GPUI says what its
 //! keyboard should show back to the view, and where its caret is (`on_keyboard`). Only the activity's own window has a
 //! TalkBack tree yet.
 
@@ -41,6 +41,8 @@ pub(crate) enum Told {
     Edit(u64, Edit),
     /// The keyboard's action key.
     Action(u64),
+    /// Files dropped on the view at (x, y), in its surface's pixels, as paths the app copied them to.
+    Drop { id: u64, x: f32, y: f32, paths: Vec<std::path::PathBuf> },
     /// The activity's lifecycle (`life`).
     Life(Life),
 }
@@ -227,6 +229,13 @@ pub fn edit(
 /// The keyboard's action key on window `id` (Done, Go, Send, or a new line).
 pub fn action(id: u64) {
     tell(Told::Action(id));
+}
+
+/// Files dropped on window `id`'s view (`onDragEvent`'s `ACTION_DROP`) at (x, y), in its surface's
+/// pixels: `paths` are files the app copied the drop's content to, since Android gives a drop as
+/// content URIs. GPUI hears it as a drop of `ExternalPaths` there, as a desktop's file drop.
+pub fn dropped(id: u64, x: f32, y: f32, paths: Vec<std::path::PathBuf>) {
+    tell(Told::Drop { id, x, y, paths });
 }
 
 /// Device pixels as GPUI's insets at `scale`.

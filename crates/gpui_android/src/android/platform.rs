@@ -248,6 +248,11 @@ impl AndroidPlatformState {
                     input::action(&window);
                 }
             }
+            Told::Drop { id, x, y, paths } => {
+                if let Some(window) = self.by_id(id) {
+                    input::dropped(&window, x, y, paths, scale);
+                }
+            }
             Told::Life(life) => self.life(life),
         }
     }
