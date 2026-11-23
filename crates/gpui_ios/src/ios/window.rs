@@ -530,14 +530,15 @@ impl IosWindowState {
     }
 
     /// Delivers a UIKit touch through GPUI's platform-neutral touch API.
-    pub fn handle_touch(&self, touch: &UITouch, _event: Option<&UIEvent>) {
-        // GPUI timestamps delivery itself. Replaying UIKit's historical coalesced
-        // samples here would make them appear simultaneous and distort fling velocity.
+    pub fn handle_touch(&self, touch: &UITouch, event: Option<&UIEvent>) {
+        // GPUI timestamps delivery itself. Replaying UIKit's coalesced samples as
+        // events would make them appear simultaneous and distort fling velocity:
+        // they ride on the one event, as `coalesced`, for a listener that draws.
         let id = touch_id(touch);
-        self.handle_touch_sample(touch, id);
+        self.handle_touch_sample(touch, event, id);
     }
 
-    fn handle_touch_sample(&self, touch: &UITouch, id: TouchId) {
+    fn handle_touch_sample(&self, touch: &UITouch, ui_event: Option<&UIEvent>, id: TouchId) {
         let position = touch_location_in_view(touch, &self.view);
         self.mouse_position.set(position);
         self.pointer.set(Some(touch_pointer(touch, id)));
@@ -548,6 +549,8 @@ impl IosWindowState {
             position,
             predicted_position: None,
             force: touch_force(touch),
+            tilt: touch_tilt(touch, &self.view),
+            coalesced: touch_samples(touch, ui_event, &self.view),
         };
         self.handle_keyboard_dismiss_touch(&event);
         self.input_callback
