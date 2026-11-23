@@ -8,8 +8,8 @@
 //! queued here and handled on GPUI's thread at its next wake. A surface going away waits until GPUI
 //! has let go of it.
 //!
-//! Its keys and the IME's text come the same way (`key`, `text`, `action`), and GPUI says what its
-//! keyboard should show back to the view (`on_keyboard`). Only the activity's own window has a
+//! Its keys and the IME's edits come the same way (`key`, `edit`, `action`), and GPUI says what its
+//! keyboard should show back to the view, and where its caret is (`on_keyboard`). Only the activity's own window has a
 //! TalkBack tree yet.
 
 use std::sync::mpsc;
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use gpui::{Edges, TouchPhase, WindowInsets, px};
 pub use ndk::native_window::NativeWindow;
-pub use super::text_input::{TextInputState, TextSpan};
+pub use super::text_input::{Edit, TextInputState, TextSpan};
 
 /// What the app's activity told of window `id`, for GPUI's thread.
 pub(crate) enum Told {
@@ -37,8 +37,8 @@ pub(crate) enum Told {
     /// A key, as Android's `KeyEvent` gives it: its code, meta state, whether down, its repeat
     /// count, and the character it types with its meta state and without (0 for none).
     Key { id: u64, code: u32, meta: u32, down: bool, repeat: i32, typed: u32, bare: u32 },
-    /// The IME changed the text the app's view holds for the focused input.
-    Text(u64, TextInputState),
+    /// The IME edited the text the app's view holds for the focused input.
+    Edit(u64, Edit),
     /// The keyboard's action key.
     Action(u64),
     /// The activity's lifecycle (`life`).
@@ -84,8 +84,13 @@ pub enum Keyboard {
     Hide,
     /// The focused input's kind: `EditorInfo.inputType` and the action's `imeOptions`.
     Editor { input_type: u32, action: u32 },
-    /// The focused input's text around the caret, its selection and composing region (UTF-16).
-    State(TextInputState),
+    /// The focused input's text around the caret, its selection and composing region (UTF-16),
+    /// after the view's edit `seq` (`edit`): the view drops it if it has edited since.
+    State { seq: u32, state: TextInputState },
+    /// Where the caret is, then each character of the composing region, in the view's device
+    /// pixels: the caret's x, top, baseline and bottom, then each character's left, top, right and
+    /// bottom. The view gives it to the IME as `CursorAnchorInfo`.
+    Anchor(Vec<f32>),
 }
 
 static TOLD: Mutex<Vec<Told>> = Mutex::new(Vec::new());
@@ -201,11 +206,22 @@ pub fn key(id: u64, code: u32, meta: u32, down: bool, repeat: i32, typed: u32, b
     tell(Told::Key { id, code, meta, down, repeat, typed, bare });
 }
 
-/// The IME's text for window `id`'s focused input, after its edit: the whole text the view holds,
-/// its selection, and its composing region if any (UTF-16 offsets).
-pub fn text(id: u64, text: String, selection: (usize, usize), compose: Option<(usize, usize)>) {
+/// The IME's edit `seq` to window `id`'s focused input, in the text the view holds (UTF-16
+/// offsets): `replaced` became `text` (none: only the selection or composing region moved), then
+/// the selection and the composing region if any.
+pub fn edit(
+    id: u64,
+    seq: u32,
+    replaced: Option<(usize, usize)>,
+    text: String,
+    selection: (usize, usize),
+    compose: Option<(usize, usize)>,
+) {
     let span = |(start, end): (usize, usize)| TextSpan { start, end };
-    tell(Told::Text(id, TextInputState { text, selection: span(selection), compose_region: compose.map(span) }));
+    tell(Told::Edit(
+        id,
+        Edit { seq, replaced: replaced.map(span), text, selection: span(selection), compose_region: compose.map(span) },
+    ));
 }
 
 /// The keyboard's action key on window `id` (Done, Go, Send, or a new line).
