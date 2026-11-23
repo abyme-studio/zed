@@ -124,6 +124,9 @@ pub(super) struct TextInputIvars {
     selection_changed: Cell<bool>,
     content_changed: Cell<bool>,
     native_edit: Cell<bool>,
+    /// UIKit's text interaction on the drawn view while this view edits: its caret, handles,
+    /// loupe and edit menu over GPUI's text (tessera-phone-host 6.1, a spike).
+    interaction: RefCell<Option<Retained<UITextInteraction>>>,
 }
 
 define_class!(
@@ -146,6 +149,7 @@ define_class!(
         fn resign_first_responder(&self) -> bool {
             let was_first_responder = self.isFirstResponder();
             let resigned: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if resigned { self.detach_interaction(); }
             if resigned && was_first_responder && !self.ivars().reconciling_responder.get() {
                 // UIKit can end native editing or transfer it to another view
                 // without changing GPUI focus. A repaint must not reclaim it.
@@ -153,6 +157,66 @@ define_class!(
                 self.ivars().keyboard_eligible.set(false);
             }
             resigned
+        }
+
+        #[unsafe(method(canPerformAction:withSender:))]
+        fn can_perform_action(&self, action: objc2::runtime::Sel, _sender: Option<&AnyObject>) -> bool {
+            let selected = self.selected_range().is_some_and(|range| !range.is_empty());
+            let has_text = self.document_range().is_some_and(|range| !range.is_empty());
+            let pasteable: bool = unsafe { UIPasteboard::generalPasteboard().hasStrings() };
+            if action == sel!(copy:) || action == sel!(cut:) {
+                selected
+            } else if action == sel!(paste:) {
+                pasteable
+            } else if action == sel!(selectAll:) {
+                has_text
+            } else if action == sel!(select:) {
+                !selected && has_text
+            } else {
+                false
+            }
+        }
+
+        #[unsafe(method(copy:))]
+        fn copy_action(&self, _sender: Option<&AnyObject>) {
+            self.copy_selection();
+        }
+
+        #[unsafe(method(cut:))]
+        fn cut(&self, sender: Option<&AnyObject>) {
+            let _ = sender;
+            self.copy_selection();
+            let Some(range) = self.selected_range() else { return; };
+            self.edit(|handler| if allowed_range(handler, &range) { handler.replace_text_in_range(Some(range), ""); });
+            self.ivars().content_changed.set(true);
+            self.ivars().selection_changed.set(true);
+            self.refresh_keyboard();
+        }
+
+        #[unsafe(method(paste:))]
+        fn paste(&self, _sender: Option<&AnyObject>) {
+            let Some(text) = (unsafe { UIPasteboard::generalPasteboard().string() }) else { return; };
+            self.edit(|handler| handler.replace_text_in_range(None, &text.to_string()));
+            self.ivars().content_changed.set(true);
+            self.ivars().selection_changed.set(true);
+            self.refresh_keyboard();
+        }
+
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            let Some(range) = self.document_range() else { return; };
+            self.edit(|handler| handler.set_selected_text_range(range));
+            self.ivars().selection_changed.set(true);
+            self.refresh_keyboard();
+        }
+
+        #[unsafe(method(select:))]
+        fn select(&self, _sender: Option<&AnyObject>) {
+            let Some(caret) = self.selected_range() else { return; };
+            let Some(word) = self.word_range(caret.start) else { return; };
+            self.edit(|handler| handler.set_selected_text_range(word));
+            self.ivars().selection_changed.set(true);
+            self.refresh_keyboard();
         }
 
         #[unsafe(method(reconcileTextInput))]
@@ -168,6 +232,7 @@ define_class!(
             self.ivars().keyboard_eligible.set(eligible);
             if self.canBecomeFirstResponder() {
                 if !self.isFirstResponder() { self.becomeFirstResponder(); }
+                if self.isFirstResponder() { self.attach_interaction(); }
             } else if self.isFirstResponder() {
                 let previous = self.ivars().reconciling_responder.replace(true);
                 self.resignFirstResponder();
@@ -504,6 +569,7 @@ impl TextInputView {
             selection_changed: Cell::new(false),
             content_changed: Cell::new(false),
             native_edit: Cell::new(false),
+            interaction: RefCell::new(None),
         });
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
@@ -562,6 +628,56 @@ impl TextInputView {
 
     fn document_range(&self) -> Option<Range<usize>> {
         self.with_handler(document_range).flatten()
+    }
+
+    fn copy_selection(&self) {
+        let Some(range) = self.selected_range() else { return };
+        let text = self.with_handler(|handler| read_text(handler, range)).flatten();
+        if let Some(text) = text {
+            unsafe { UIPasteboard::generalPasteboard().setString(Some(&text)) };
+        }
+    }
+
+    fn selected_range(&self) -> Option<Range<usize>> {
+        self.with_handler(|handler| {
+            let selection = handler.selected_text_range(false)?;
+            allowed_range(handler, &selection.range).then_some(selection.range)
+        })
+        .flatten()
+    }
+
+    /// The word at `offset`, by UIKit's tokenizer over this view's text.
+    fn word_range(&self, offset: usize) -> Option<Range<usize>> {
+        let tokenizer = self.tokenizer();
+        let position = self.new_position(offset);
+        let range = tokenizer.rangeEnclosingPosition_withGranularity_inDirection(
+            &position,
+            UITextGranularity::Word,
+            UITextStorageDirection::Backward.0,
+        )?;
+        self.validated_range(&range).filter(|range| !range.is_empty())
+    }
+
+    /// UIKit's text interaction, on the drawn view (`textInputView`), for this view's text.
+    fn attach_interaction(&self) {
+        if self.ivars().interaction.borrow().is_some() {
+            return;
+        }
+        let Some(host) = self.superview() else { return };
+        let interaction =
+            UITextInteraction::textInteractionForMode(UITextInteractionMode::Editable, self.mtm());
+        unsafe { interaction.setTextInput(Some(self)) };
+        host.addInteraction(ProtocolObject::from_ref(&*interaction));
+        log::info!("tessera-phone-host 6.1: UITextInteraction attached");
+        *self.ivars().interaction.borrow_mut() = Some(interaction);
+    }
+
+    fn detach_interaction(&self) {
+        let Some(interaction) = self.ivars().interaction.borrow_mut().take() else { return };
+        if let Some(host) = self.superview() {
+            host.removeInteraction(ProtocolObject::from_ref(&*interaction));
+        }
+        log::info!("tessera-phone-host 6.1: UITextInteraction detached");
     }
 
     fn bounds(&self, range: Range<usize>) -> Option<CGRect> {
