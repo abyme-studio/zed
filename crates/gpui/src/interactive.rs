@@ -140,13 +140,36 @@ pub struct PointerInfo {
     pub pressure: Option<f32>,
 }
 
+/// A pen's tilt, in radians, as the DOM's `altitudeAngle` and `azimuthAngle`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PenTilt {
+    /// The pen's angle from the glass: 0 flat on it, pi/2 upright.
+    pub altitude: f32,
+    /// The direction the pen points along the glass: 0 along +x, rising
+    /// clockwise on screen (toward +y, which is down).
+    pub azimuth: f32,
+}
+
+/// One sample of a touch that the platform read between two deliveries.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TouchSample {
+    /// Where the touch was, in window coordinates.
+    pub position: Point<Pixels>,
+    /// Normalized force in `0.0..=1.0`, if the hardware reports it.
+    pub force: Option<f32>,
+    /// A pen's tilt, if the hardware reports it.
+    pub tilt: Option<PenTilt>,
+}
+
 /// A raw touch event from the platform.
 ///
-///
-/// Dispatch contract (core implementation pending): a touch is hit-tested
-/// once, at [`TouchPhase::Started`], occlusion-aware; all subsequent events
-/// for the same [`TouchId`] are delivered to the elements under the starting
-/// position, even after the touch moves outside them.
+/// The window gives every one to its mouse listeners
+/// ([`Window::on_mouse_event`](crate::Window::on_mouse_event) for
+/// `TouchEvent`), before its gesture recognizer reads it. A
+/// listener that wants a touch as it is (drawing, a slider under the finger)
+/// calls [`Window::claim_touch`](crate::Window::claim_touch): the recognizer
+/// lets go of it, and its later events reach the listeners alone, at their
+/// real place, with no slop, axis lock, tap or fling.
 #[derive(Clone, Debug, Default)]
 pub struct TouchEvent {
     /// Which touch this event belongs to.
@@ -166,6 +189,14 @@ pub struct TouchEvent {
     pub predicted_position: Option<Point<Pixels>>,
     /// Normalized touch force in `0.0..=1.0`, if the hardware reports it.
     pub force: Option<f32>,
+    /// A pen's tilt, if the hardware reports it.
+    pub tilt: Option<PenTilt>,
+    /// The samples the platform read since the last delivery of this touch,
+    /// oldest first, this event's own last, as the DOM's
+    /// `getCoalescedEvents()`; empty where the platform reads none between
+    /// deliveries. GPUI's recognizer reads only the event itself, one sample
+    /// a delivery, so a fling's speed is the same with or without them.
+    pub coalesced: Vec<TouchSample>,
 }
 
 impl Sealed for TouchEvent {}
@@ -174,6 +205,7 @@ impl InputEvent for TouchEvent {
         PlatformInput::Touch(self)
     }
 }
+impl MouseEvent for TouchEvent {}
 
 /// A mouse down event from the platform
 #[derive(Clone, Debug, Default)]

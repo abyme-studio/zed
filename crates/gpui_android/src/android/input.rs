@@ -92,6 +92,8 @@ pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: 
         position: position(x, y, scale),
         predicted_position: None,
         force,
+        tilt: None,
+        coalesced: Vec::new(),
     };
     window.mouse_position.set(event.position);
     window.pointer.set(Some(gpui::PointerInfo {

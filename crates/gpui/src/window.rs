@@ -28,7 +28,7 @@ use crate::{
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
-use crate::interactive::TouchEvent;
+use crate::interactive::{TouchEvent, TouchId};
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet};
 use derive_more::{Deref, DerefMut};
@@ -1302,6 +1302,9 @@ pub struct Window {
     pub(crate) window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
+    /// The touches a listener claimed (`claim_touch`), and whether the
+    /// recognizer has let go of each yet.
+    claimed_touches: Vec<(TouchId, bool)>,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
@@ -2496,6 +2499,7 @@ impl Window {
                     .gestures()
                     .map_or_else(GestureTuning::default, |gestures| gestures.tuning()),
             ),
+            claimed_touches: Vec::new(),
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
@@ -6394,13 +6398,63 @@ impl Window {
         self.touch_prediction_enabled = enabled;
     }
 
-    /// Runs the portable gesture recognizer over a raw touch event and
+    /// Takes touch `id` for the listener that calls it, while handling one of
+    /// its [`TouchEvent`]s or later: GPUI's recognizer lets go of it (a pan
+    /// it was in ends, with no fling; a pending tap or long press never
+    /// comes), and its events from the next on reach the `TouchEvent`
+    /// listeners alone, until it ends. Claimed at
+    /// [`TouchPhase::Started`](crate::TouchPhase), the recognizer never sees it.
+    pub fn claim_touch(&mut self, id: TouchId) {
+        if !self.claimed_touches.iter().any(|(claimed, _)| *claimed == id) {
+            self.claimed_touches.push((id, false));
+        }
+    }
+
+    /// Whether a listener claimed touch `id` ([`Self::claim_touch`]).
+    pub fn touch_claimed(&self, id: TouchId) -> bool {
+        self.claimed_touches.iter().any(|(claimed, _)| *claimed == id)
+    }
+
+    /// Gives a raw touch event to the `TouchEvent` listeners, then, unless one
+    /// claimed the touch, runs the portable gesture recognizer over it and
     /// dispatches whatever it resolves (scroll steps, synthesized taps)
     /// through the ordinary mouse-event path.
     fn dispatch_touch_event(&mut self, event: &TouchEvent, cx: &mut App) {
         let mut event = event.clone();
         if !self.touch_prediction_enabled {
             event.predicted_position = None;
+        }
+        self.mouse_position = event.position;
+        cx.propagate_event = true;
+        self.dispatch_mouse_event(&event, cx);
+        let ends = matches!(
+            event.phase,
+            crate::TouchPhase::Ended | crate::TouchPhase::Cancelled
+        );
+        if let Some(index) = self
+            .claimed_touches
+            .iter()
+            .position(|(claimed, _)| *claimed == event.id)
+        {
+            if !self.claimed_touches[index].1 {
+                // The recognizer lets go as a cancelled touch does: a pan
+                // ends with no fling, and nothing pending comes.
+                self.claimed_touches[index].1 = true;
+                let cancelled = TouchEvent {
+                    phase: crate::TouchPhase::Cancelled,
+                    ..event.clone()
+                };
+                for gesture in self.touch_gestures.handle_event(&cancelled) {
+                    self.dispatch_recognized_touch_gesture(gesture, cx);
+                }
+                if self.touch_gestures.pending_long_press().is_none() {
+                    self.long_press_timer.take();
+                }
+            }
+            if ends {
+                self.claimed_touches.remove(index);
+            }
+            return;
         }
         let recognized_gestures = self.touch_gestures.handle_event(&event);
         if event.phase == crate::TouchPhase::Started
@@ -10079,6 +10133,174 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct RawTouches {
+        touches: Vec<(TouchPhase, Point<Pixels>)>,
+        scrolls: Vec<TouchPhase>,
+        downs: usize,
+    }
+
+    /// Reads raw touches, scrolls and presses, and claims the touch at its
+    /// `claim_at`th raw event.
+    struct RawTouchListener {
+        seen: Rc<RefCell<RawTouches>>,
+        claim_at: Option<usize>,
+    }
+
+    impl Render for RawTouchListener {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let seen = self.seen.clone();
+            let claim_at = self.claim_at;
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let touches = seen.clone();
+                    window.on_mouse_event(move |event: &TouchEvent, phase, window, _cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        let mut seen = touches.borrow_mut();
+                        if claim_at == Some(seen.touches.len()) {
+                            window.claim_touch(event.id);
+                        }
+                        seen.touches.push((event.phase, event.position));
+                    });
+                    let scrolls = seen.clone();
+                    window.on_mouse_event(move |event: &crate::ScrollEvent, phase, _, _| {
+                        if phase == DispatchPhase::Bubble {
+                            scrolls.borrow_mut().scrolls.push(event.touch_phase);
+                        }
+                    });
+                    let downs = seen.clone();
+                    window.on_mouse_event(move |_: &MouseDownEvent, phase, _, _| {
+                        if phase == DispatchPhase::Bubble {
+                            downs.borrow_mut().downs += 1;
+                        }
+                    });
+                },
+            )
+        }
+    }
+
+    fn raw_touches(
+        cx: &mut TestAppContext,
+        claim_at: Option<usize>,
+        moves: &[(TouchPhase, f32, f32)],
+    ) -> Rc<RefCell<RawTouches>> {
+        let seen = Rc::new(RefCell::new(RawTouches::default()));
+        let window = cx.add_window({
+            let seen = seen.clone();
+            move |_, _| RawTouchListener { seen, claim_at }
+        });
+        for &(phase, x, y) in moves {
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_event(
+                        TouchEvent {
+                            id: TouchId(1),
+                            phase,
+                            position: point(px(x), px(y)),
+                            ..Default::default()
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                })
+                .unwrap();
+        }
+        cx.run_until_parked();
+        seen
+    }
+
+    #[gpui::test]
+    fn raw_touches_reach_listeners_and_an_unclaimed_one_still_pans(cx: &mut TestAppContext) {
+        let seen = raw_touches(
+            cx,
+            None,
+            &[
+                (TouchPhase::Started, 0., 0.),
+                (TouchPhase::Moved, 0., 40.),
+                (TouchPhase::Ended, 0., 40.),
+            ],
+        );
+        let seen = seen.borrow();
+        assert_eq!(
+            seen.touches,
+            [
+                (TouchPhase::Started, point(px(0.), px(0.))),
+                (TouchPhase::Moved, point(px(0.), px(40.))),
+                (TouchPhase::Ended, point(px(0.), px(40.))),
+            ]
+        );
+        assert_eq!(seen.scrolls.first(), Some(&TouchPhase::Started));
+        assert_eq!(seen.downs, 0);
+    }
+
+    #[gpui::test]
+    fn a_touch_claimed_at_its_start_moves_freely_with_no_pan_or_tap(cx: &mut TestAppContext) {
+        let seen = raw_touches(
+            cx,
+            Some(0),
+            &[
+                (TouchPhase::Started, 10., 10.),
+                (TouchPhase::Moved, 11., 12.),
+                (TouchPhase::Moved, 60., 45.),
+                (TouchPhase::Ended, 60., 45.),
+            ],
+        );
+        let seen = seen.borrow();
+        // Within the slop and off any axis, each place is the finger's own.
+        assert_eq!(
+            seen.touches,
+            [
+                (TouchPhase::Started, point(px(10.), px(10.))),
+                (TouchPhase::Moved, point(px(11.), px(12.))),
+                (TouchPhase::Moved, point(px(60.), px(45.))),
+                (TouchPhase::Ended, point(px(60.), px(45.))),
+            ]
+        );
+        assert!(seen.scrolls.is_empty(), "{:?}", seen.scrolls);
+        assert_eq!(seen.downs, 0);
+    }
+
+    #[gpui::test]
+    fn a_touch_claimed_mid_pan_ends_the_pan_with_no_fling(cx: &mut TestAppContext) {
+        let seen = raw_touches(
+            cx,
+            Some(2),
+            &[
+                (TouchPhase::Started, 0., 0.),
+                (TouchPhase::Moved, 0., 40.),
+                (TouchPhase::Moved, 0., 80.),
+                (TouchPhase::Moved, 0., 400.),
+                (TouchPhase::Ended, 0., 400.),
+            ],
+        );
+        let seen = seen.borrow();
+        assert_eq!(seen.touches.len(), 5);
+        assert_eq!(seen.scrolls.first(), Some(&TouchPhase::Started));
+        assert_eq!(seen.scrolls.last(), Some(&TouchPhase::Cancelled));
+        assert_eq!(seen.downs, 0);
+    }
+
+    #[gpui::test]
+    fn a_claimed_touch_is_forgotten_once_it_ends(cx: &mut TestAppContext) {
+        let seen = Rc::new(RefCell::new(RawTouches::default()));
+        let window = cx.add_window({
+            let seen = seen.clone();
+            move |_, _| RawTouchListener { seen, claim_at: Some(0) }
+        });
+        let touch = TouchId(1);
+        dispatch_touch(window, cx, touch, TouchPhase::Started, 0.);
+        window
+            .update(cx, |_, window, _| assert!(window.touch_claimed(touch)))
+            .unwrap();
+        dispatch_touch(window, cx, touch, TouchPhase::Ended, 0.);
+        window
+            .update(cx, |_, window, _| assert!(!window.touch_claimed(touch)))
+            .unwrap();
+    }
+
     #[gpui::test]
     fn back_gesture_is_claimed_by_the_innermost_listener(cx: &mut TestAppContext) {
         let claims = Rc::new(RefCell::new(Vec::new()));
@@ -10896,6 +11118,8 @@ mod tests {
                         position: point(px(x), px(0.)),
                         predicted_position: None,
                         force: None,
+                        tilt: None,
+                        coalesced: Vec::new(),
                     }
                     .to_platform_input(),
                     cx,
