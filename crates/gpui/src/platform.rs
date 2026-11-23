@@ -2647,6 +2647,10 @@ pub struct TextInputConfiguration {
     pub input_action: TextInputAction,
     /// The kind of software keyboard to show for the text.
     pub input_mode: TextInputMode,
+    /// What the text is, for the platform's autofill: an HTML `autocomplete` value
+    /// (<https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#autofill>),
+    /// such as `one-time-code`, `username` or `current-password`. Empty for none.
+    pub autocomplete: SharedString,
 }
 
 /// The kind of software keyboard a text region asks for.

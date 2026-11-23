@@ -266,6 +266,12 @@ define_class!(
                 TextInputAction::Send => UIReturnKeyType::Send,
             }
         }
+        /// The field's `autocomplete` as UIKit's content type: what brings password, code and
+        /// contact autofill to the keyboard. None for a value UIKit has no type for.
+        #[unsafe(method_id(textContentType))]
+        fn text_content_type(&self) -> Option<Retained<UITextContentType>> {
+            content_type(&self.ivars().configuration.borrow().autocomplete).map(|t| t.retain())
+        }
     }
 
     unsafe impl UITextInput for TextInputView {
@@ -657,6 +663,48 @@ impl TextInputView {
     }
 }
 
+/// UIKit's content type for an HTML `autocomplete` value. Its last token is the field's kind
+/// (`shipping street-address`, `section-a email`), and a trailing `webauthn` only asks for passkeys
+/// beside it. Only the types iOS 15 has: a newer one would not link there.
+fn content_type(autocomplete: &str) -> Option<&'static UITextContentType> {
+    let mut tokens = autocomplete.split_ascii_whitespace().rev();
+    let mut token = tokens.next()?;
+    if token.eq_ignore_ascii_case("webauthn") {
+        token = tokens.next()?;
+    }
+    let token = token.to_ascii_lowercase();
+    // SAFETY: UIKit's constant strings, linked with the framework and never mutated.
+    unsafe {
+        Some(match token.as_str() {
+            "name" => UITextContentTypeName,
+            "honorific-prefix" => UITextContentTypeNamePrefix,
+            "given-name" => UITextContentTypeGivenName,
+            "additional-name" => UITextContentTypeMiddleName,
+            "family-name" => UITextContentTypeFamilyName,
+            "honorific-suffix" => UITextContentTypeNameSuffix,
+            "nickname" => UITextContentTypeNickname,
+            "organization-title" => UITextContentTypeJobTitle,
+            "organization" => UITextContentTypeOrganizationName,
+            "street-address" => UITextContentTypeFullStreetAddress,
+            "address-line1" => UITextContentTypeStreetAddressLine1,
+            "address-line2" => UITextContentTypeStreetAddressLine2,
+            "address-level2" => UITextContentTypeAddressCity,
+            "address-level1" => UITextContentTypeAddressState,
+            "country-name" => UITextContentTypeCountryName,
+            "postal-code" => UITextContentTypePostalCode,
+            "tel" => UITextContentTypeTelephoneNumber,
+            "email" => UITextContentTypeEmailAddress,
+            "url" => UITextContentTypeURL,
+            "cc-number" => UITextContentTypeCreditCardNumber,
+            "username" => UITextContentTypeUsername,
+            "current-password" => UITextContentTypePassword,
+            "new-password" => UITextContentTypeNewPassword,
+            "one-time-code" => UITextContentTypeOneTimeCode,
+            _ => return None,
+        })
+    }
+}
+
 fn native_rect(bounds: gpui::Bounds<gpui::Pixels>) -> CGRect {
     CGRect::new(
         CGPoint::new(f64::from(bounds.origin.x), f64::from(bounds.origin.y)),
@@ -893,8 +941,22 @@ pub(super) mod tests {
             suggestions: true,
             input_action: TextInputAction::Search,
             input_mode: TextInputMode::Decimal,
+            autocomplete: "one-time-code".into(),
         });
         assert_eq!(view.keyboardType(), UIKeyboardType::DecimalPad);
+        let content: Option<Retained<UITextContentType>> =
+            unsafe { msg_send![&*view, textContentType] };
+        assert_eq!(content.as_deref(), Some(unsafe { UITextContentTypeOneTimeCode }));
+        for (autocomplete, expected) in [
+            ("shipping street-address", Some(unsafe { UITextContentTypeFullStreetAddress })),
+            ("username webauthn", Some(unsafe { UITextContentTypeUsername })),
+            ("CURRENT-PASSWORD", Some(unsafe { UITextContentTypePassword })),
+            ("off", None),
+            ("", None),
+            ("webauthn", None),
+        ] {
+            assert_eq!(content_type(autocomplete), expected, "{autocomplete:?}");
+        }
         assert_eq!(view.autocorrectionType(), UITextAutocorrectionType::Yes);
         assert_eq!(
             view.autocapitalizationType(),
