@@ -16,3 +16,7 @@ pub use android::{AndroidPlatform, activity, assets, current_platform, files_dir
 /// Every window's view, the activity's own (id 0) and each after it, and the activity's lifecycle.
 #[cfg(target_os = "android")]
 pub use android::others as windows;
+
+/// Each window's accessibility tree, which its view gives Android as its node provider.
+#[cfg(target_os = "android")]
+pub use android::a11y;
