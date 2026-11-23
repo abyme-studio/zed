@@ -325,7 +325,7 @@ PreparedBackground prepare_background(Background background) {
     output.tag = background.tag;
     output.color1 = float4(0.0, 0.0, 0.0, 0.0);
 
-    if (background.tag == 1) {
+    if (background.tag == 1 || background.tag == 6) {
         output.color0 = hsla_to_rgba(background.colors[0].color);
         output.color1 = hsla_to_rgba(background.colors[1].color);
         // Interpolating in Oklab means converting the endpoints once rather
@@ -403,6 +403,21 @@ float4 background_color(PreparedBackground prepared, Background background, Boun
             float dither = dither_offset(position);
             color.rgb += dither * 1.0 / 255.0;
             color.a   += dither * 1.5 / 255.0;
+            break;
+        }
+        case 6: {
+            // A radial gradient: its centre (solid.h, solid.s) from the bounds' top
+            // left and its radii (solid.l, solid.a), scaled px; t is 0 at the
+            // centre and 1 at the radii, then through the stops.
+            float2 center = bounds.origin + float2(background.solid.h, background.solid.s);
+            float2 radii = max(float2(background.solid.l, background.solid.a), float2(0.0001, 0.0001));
+            float t = length((position - center) / radii);
+            t = (t - background.colors[0].percentage)
+                / max(background.colors[1].percentage - background.colors[0].percentage, 0.0001);
+            color = lerp(prepared.color0, prepared.color1, saturate(t));
+            if (background.color_space == 1) {
+                color = oklab_to_srgb(color);
+            }
             break;
         }
         case 2: {
@@ -572,6 +587,15 @@ float4 quad_fragment(QuadFragmentInput input): SV_Target {
     Quad quad = quads[input.quad_id];
     float4 background =
         background_color(input.background, quad.background, quad.bounds, input.position.xy);
+
+    // A radial gradient with a ring: drawn only in a band that wide inside the
+    // quad's rounded edge, its border unused.
+    if (quad.background.tag == 6 && quad.background.gradient_angle_or_pattern_height > 0.0) {
+        float edge = quad_sdf(input.position.xy, quad.bounds, quad.corner_radii);
+        float ring = quad.background.gradient_angle_or_pattern_height;
+        return background * float4(1.0, 1.0, 1.0, saturate(0.5 - edge) * saturate(ring + 0.5 + edge));
+    }
+
     bool unrounded = !has_rounded_corners(quad.corner_radii);
 
     float2 size = quad.bounds.size;

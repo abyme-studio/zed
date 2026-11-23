@@ -445,7 +445,7 @@ fn prepare_background(background: Background) -> PreparedBackground {
     result.tag = background.tag;
     result.color1 = vec4<f32>(0.0);
 
-    if (background.tag == 1u) {
+    if (background.tag == 1u || background.tag == 6u) {
         // hsla_to_rgba answers non-linear sRGB, which the Unorm target takes as it is, as
         // Metal's shader does: an sRGB gradient mixes these, an Oklab one decodes them first.
         result.color0 = hsla_to_rgba(background.colors[0].color);
@@ -559,6 +559,22 @@ fn background_color(prepared: PreparedBackground, background: Background, bounds
             if (lines != 2u) { cover = max(cover, across.y); }
             color.a *= cover;
         }
+        case 6u: {
+            // A radial gradient: its centre (solid.h, solid.s) from the bounds' top
+            // left and its radii (solid.l, solid.a), scaled px; t is 0 at the
+            // centre and 1 at the radii, then through the stops.
+            let center = bounds.origin + vec2<f32>(background.solid.h, background.solid.s);
+            let radii = max(vec2<f32>(background.solid.l, background.solid.a), vec2<f32>(0.0001));
+            var t = length((position - center) / radii);
+            t = (t - background.colors[0].percentage)
+                / max(background.colors[1].percentage - background.colors[0].percentage, 0.0001);
+            color = mix(prepared.color0, prepared.color1, saturate(t));
+            if (background.color_space == 1u) {
+                color = linear_to_gamma(oklab_to_linear_srgb(color));
+            }
+            let dither = dither_offset(position);
+            color = vec4<f32>(color.rgb + dither * 1.0 / 255.0, color.a + dither * 1.5 / 255.0);
+        }
         case 5u: {
             // A disc of radius colors[0].percentage px at each size px tile's centre.
             let size = background.gradient_angle_or_pattern_height;
@@ -666,6 +682,14 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     let prepared = PreparedBackground(input.background_color0, input.background_color1,
         input.background_tag);
     let background = background_color(prepared, quad.background, quad.bounds, input.position.xy);
+
+    // A radial gradient with a ring: drawn only in a band that wide inside the
+    // quad's rounded edge, its border unused.
+    if (quad.background.tag == 6u && quad.background.gradient_angle_or_pattern_height > 0.0) {
+        let edge = quad_sdf(input.position.xy, quad.bounds, quad.corner_radii);
+        let ring = quad.background.gradient_angle_or_pattern_height;
+        return masked(blend_color(background, saturate(0.5 - edge) * saturate(ring + 0.5 + edge)), mask_alpha);
+    }
     let unrounded = !has_rounded_corners(quad.corner_radii);
 
     let size = quad.bounds.size;

@@ -749,6 +749,7 @@ pub(crate) enum BackgroundTag {
     Checkerboard = 3,
     PatternLines = 4,
     PatternDots = 5,
+    RadialGradient = 6,
 }
 
 /// A color space for color interpolation.
@@ -819,6 +820,17 @@ impl std::fmt::Debug for Background {
                 f,
                 "PatternDots({:?}, {}, {})",
                 self.solid, self.gradient_angle_or_pattern_height, self.colors[0].percentage
+            ),
+            BackgroundTag::RadialGradient => write!(
+                f,
+                "RadialGradient(at {}, {}; radii {}, {}; ring {}; {:?}, {:?})",
+                self.solid.h,
+                self.solid.s,
+                self.solid.l,
+                self.solid.a,
+                self.gradient_angle_or_pattern_height,
+                self.colors[0],
+                self.colors[1]
             ),
         }
     }
@@ -899,6 +911,35 @@ pub fn pattern_dots(color: impl Into<Hsla>, size: f32, radius: f32) -> Backgroun
     };
     background.colors[0].percentage = radius;
     background
+}
+
+/// Creates a radial gradient, as CSS's `radial-gradient(rx ry at x y, from, to)`: its centre
+/// `center` from the bounds' top left and its radii `radii`, in scaled pixels; a stop's percentage
+/// runs from 0.0 at the centre to 1.0 at the radii. A `ring` above 0.0 draws it only in a band that
+/// many scaled pixels wide inside the quad's rounded edge, as a mask of the padding box would: a
+/// rim lit from one point.
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/radial-gradient>
+pub fn radial_gradient(
+    center: (f32, f32),
+    radii: (f32, f32),
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+    ring: f32,
+) -> Background {
+    // The centre and radii ride in `solid`, which a radial gradient draws no colour from.
+    Background {
+        tag: BackgroundTag::RadialGradient,
+        solid: Hsla {
+            h: center.0,
+            s: center.1,
+            l: radii.0,
+            a: radii.1,
+        },
+        gradient_angle_or_pattern_height: ring,
+        colors: [from.into(), to.into()],
+        ..Default::default()
+    }
 }
 
 /// Creates a solid background color.
@@ -982,7 +1023,10 @@ impl Background {
     /// Returns a new background color with the same hue, saturation, and lightness, but with a modified alpha value.
     pub fn opacity(&self, factor: f32) -> Self {
         let mut background = *self;
-        background.solid = background.solid.opacity(factor);
+        // A radial gradient's `solid` is its centre and radii, no colour.
+        if self.tag != BackgroundTag::RadialGradient {
+            background.solid = background.solid.opacity(factor);
+        }
         background.colors = [
             self.colors[0].opacity(factor),
             self.colors[1].opacity(factor),
@@ -994,7 +1038,9 @@ impl Background {
     pub fn is_transparent(&self) -> bool {
         match self.tag {
             BackgroundTag::Solid => self.solid.is_transparent(),
-            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
+            BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => {
+                self.colors.iter().all(|c| c.color.is_transparent())
+            }
             BackgroundTag::PatternSlash => self.solid.is_transparent(),
             BackgroundTag::Checkerboard => self.solid.is_transparent(),
             BackgroundTag::PatternLines | BackgroundTag::PatternDots => self.solid.is_transparent(),
@@ -1121,5 +1167,16 @@ mod tests {
         };
         assert!((color.opacity(0.5).a - 0.4).abs() < 1e-6);
         assert_eq!(color.opacity(2.0).a, 0.8);
+    }
+
+    #[test]
+    fn a_radial_gradient_fades_its_stops_and_keeps_its_centre() {
+        let from = linear_color_stop(Hsla::white(), 0.0);
+        let to = linear_color_stop(Hsla::transparent_black(), 1.0);
+        let background = radial_gradient((10.0, 20.0), (40.0, 30.0), from, to, 1.0).opacity(0.5);
+        assert_eq!(background.tag, BackgroundTag::RadialGradient);
+        assert_eq!((background.solid.h, background.solid.s, background.solid.l, background.solid.a), (10.0, 20.0, 40.0, 30.0));
+        assert_eq!(background.colors[0].color.a, 0.5);
+        assert!(!background.is_transparent());
     }
 }
