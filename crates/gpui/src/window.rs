@@ -2545,7 +2545,9 @@ pub struct DispatchEventResult {
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
 /// rendered: outside `bounds`, and outside the rounded rectangle `rounded` with `corner_radii`
 /// when any radius is above zero, cut on its curve with a pixel of antialiasing, as CSS clips
-/// `overflow: hidden` with a `border-radius`.
+/// `overflow: hidden` with a `border-radius`. When `fade_from` and `fade_to` differ, content also
+/// fades along the line between them, whole up to `fade_from` and gone from `fade_to`, as CSS's
+/// `mask-image: linear-gradient(black, transparent)` with two stops.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
@@ -2555,6 +2557,10 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub rounded: Bounds<P>,
     /// The rounded rectangle's radius per corner; all zero for none.
     pub corner_radii: Corners<P>,
+    /// Where a linear fade is still whole; none when it is `fade_to`.
+    pub fade_from: Point<P>,
+    /// Where a linear fade has gone; none when it is `fade_from`.
+    pub fade_to: Point<P>,
 }
 
 impl ContentMask<Pixels> {
@@ -2564,7 +2570,22 @@ impl ContentMask<Pixels> {
             bounds,
             rounded: bounds,
             corner_radii,
+            ..Default::default()
         }
+    }
+
+    /// This mask, also fading from whole at `from` to gone at `to`.
+    pub fn fading(self, from: Point<Pixels>, to: Point<Pixels>) -> Self {
+        ContentMask {
+            fade_from: from,
+            fade_to: to,
+            ..self
+        }
+    }
+
+    /// Whether it fades.
+    pub fn is_fading(&self) -> bool {
+        self.fade_from != self.fade_to
     }
 
     /// Whether a corner of the rounded rectangle is curved.
@@ -2581,19 +2602,24 @@ impl ContentMask<Pixels> {
             bounds: self.bounds.scale(factor),
             rounded: self.rounded.scale(factor),
             corner_radii: self.corner_radii.scale(factor),
+            fade_from: self.fade_from.scale(factor),
+            fade_to: self.fade_to.scale(factor),
         }
     }
 
     /// Intersect the content mask with the given content mask. The bounds intersect; the rounded
     /// rectangle is this mask's when it rounds, else the other's (one rounded rectangle is kept,
-    /// the innermost when this is the newer mask).
+    /// the innermost when this is the newer mask). The fade is kept the same way.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
         let round = if self.is_rounded() { self } else { other };
+        let fade = if self.is_fading() { self } else { other };
         ContentMask {
             bounds,
             rounded: round.rounded,
             corner_radii: round.corner_radii,
+            fade_from: fade.fade_from,
+            fade_to: fade.fade_to,
         }
     }
 }

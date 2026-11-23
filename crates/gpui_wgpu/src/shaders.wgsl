@@ -117,11 +117,14 @@ struct Corners {
     bottom_left: f32,
 }
 
-// GPUI's `ContentMask`: its rectangle, and a rounded rectangle cut on its curve when a radius is above zero.
+// GPUI's `ContentMask`: its rectangle, a rounded rectangle cut on its curve when a radius is above
+// zero, and a linear fade from `fade_from` (whole) to `fade_to` (gone) when they differ.
 struct ContentMask {
     bounds: Bounds,
     rounded: Bounds,
     corner_radii: Corners,
+    fade_from: vec2<f32>,
+    fade_to: vec2<f32>,
 }
 
 struct Edges {
@@ -381,15 +384,27 @@ fn rounded_rect_alpha(point: vec2<f32>, rect: Bounds, radii: Corners) -> f32 {
     return saturate(0.5 - quad_sdf(point, rect, radii));
 }
 
+// Whether a content mask cuts more than its rectangle: a rounded rectangle or a fade.
 fn has_rounded_mask(mask: ContentMask) -> bool {
     let radii = mask.corner_radii;
     return radii.top_left != 0.0 || radii.top_right != 0.0 || radii.bottom_right != 0.0
-        || radii.bottom_left != 0.0;
+        || radii.bottom_left != 0.0 || any(mask.fade_from != mask.fade_to);
 }
 
-// How much of a point a content mask's rounded rectangle keeps: 1 inside, 0 past its curve.
+// How much of a point a content mask's linear fade keeps: 1 up to `fade_from`, 0 from `fade_to`.
+fn fade_alpha(point: vec2<f32>, whole: vec2<f32>, gone: vec2<f32>) -> f32 {
+    let d = gone - whole;
+    let len2 = dot(d, d);
+    if (len2 == 0.0) {
+        return 1.0;
+    }
+    return 1.0 - saturate(dot(point - whole, d) / len2);
+}
+
+// How much of a point a content mask keeps: its rounded rectangle, 1 inside and 0 past its curve,
+// times its fade.
 fn content_mask_alpha(point: vec2<f32>, mask: ContentMask) -> f32 {
-    return rounded_rect_alpha(point, mask.rounded, mask.corner_radii);
+    return rounded_rect_alpha(point, mask.rounded, mask.corner_radii) * fade_alpha(point, mask.fade_from, mask.fade_to);
 }
 
 fn quad_sdf(point: vec2<f32>, bounds: Bounds, corner_radii: Corners) -> f32 {

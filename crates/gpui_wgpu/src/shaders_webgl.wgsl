@@ -75,7 +75,7 @@ fn read_bounds(cursor: ptr<function, InstanceCursor>) -> Bounds {
 }
 
 fn read_content_mask(cursor: ptr<function, InstanceCursor>) -> ContentMask {
-    return ContentMask(read_bounds(cursor), read_bounds(cursor), read_corners(cursor));
+    return ContentMask(read_bounds(cursor), read_bounds(cursor), read_corners(cursor), read_vec2_f32(cursor), read_vec2_f32(cursor));
 }
 
 fn read_corners(cursor: ptr<function, InstanceCursor>) -> Corners {
@@ -142,7 +142,7 @@ fn read_transformation(cursor: ptr<function, InstanceCursor>) -> TransformationM
 fn load_quad(instance_id: u32) -> Quad {
     // Keep this fixed-layout decoder explicit. Some WebGL shader compilers fail
     // to optimize the cursor's branches and dynamic vector indexing for quads.
-    let first_texel_index = instance_id * 12u;
+    let first_texel_index = instance_id * 13u;
     let width = textureDimensions(t_instances).x;
     let texel0 = fetch_instance_texel(first_texel_index, width);
     let texel1 = fetch_instance_texel(first_texel_index + 1u, width);
@@ -156,6 +156,7 @@ fn load_quad(instance_id: u32) -> Quad {
     let texel9 = fetch_instance_texel(first_texel_index + 9u, width);
     let texel10 = fetch_instance_texel(first_texel_index + 10u, width);
     let texel11 = fetch_instance_texel(first_texel_index + 11u, width);
+    let texel12 = fetch_instance_texel(first_texel_index + 12u, width);
 
     let values0 = bitcast<vec4<f32>>(texel0);
     let values1 = bitcast<vec4<f32>>(texel1);
@@ -169,6 +170,7 @@ fn load_quad(instance_id: u32) -> Quad {
     let values9 = bitcast<vec4<f32>>(texel9);
     let values10 = bitcast<vec4<f32>>(texel10);
     let values11 = bitcast<vec4<f32>>(texel11);
+    let values12 = bitcast<vec4<f32>>(texel12);
 
     return Quad(
         texel0.x,
@@ -178,32 +180,34 @@ fn load_quad(instance_id: u32) -> Quad {
             Bounds(values1.zw, values2.xy),
             Bounds(values2.zw, values3.xy),
             Corners(values3.z, values3.w, values4.x, values4.y),
+            values4.zw,
+            vec2<f32>(values5.x, values5.y),
         ),
         Background(
-            texel4.z,
-            texel4.w,
-            Hsla(values5.x, values5.y, values5.z, values5.w),
-            values6.x,
+            texel5.z,
+            texel5.w,
+            Hsla(values6.x, values6.y, values6.z, values6.w),
+            values7.x,
             array<LinearColorStop, 2>(
                 LinearColorStop(
-                    Hsla(values6.y, values6.z, values6.w, values7.x),
-                    values7.y,
+                    Hsla(values7.y, values7.z, values7.w, values8.x),
+                    values8.y,
                 ),
                 LinearColorStop(
-                    Hsla(values7.z, values7.w, values8.x, values8.y),
-                    values8.z,
+                    Hsla(values8.z, values8.w, values9.x, values9.y),
+                    values9.z,
                 ),
             ),
-            texel8.w,
+            texel9.w,
         ),
-        Hsla(values9.x, values9.y, values9.z, values9.w),
-        Corners(values10.x, values10.y, values10.z, values10.w),
-        Edges(values11.x, values11.y, values11.z, values11.w),
+        Hsla(values10.x, values10.y, values10.z, values10.w),
+        Corners(values11.x, values11.y, values11.z, values11.w),
+        Edges(values12.x, values12.y, values12.z, values12.w),
     );
 }
 
 fn load_shadow(instance_id: u32) -> Shadow {
-    var cursor = instance_cursor(instance_id * 36u);
+    var cursor = instance_cursor(instance_id * 40u);
     return Shadow(
         read_word(&cursor),
         read_f32(&cursor),
@@ -247,7 +251,7 @@ fn load_path_curve(index: u32) -> PathCurve {
 }
 
 fn load_path_paint(index: u32) -> PathPaint {
-    var cursor = instance_cursor((globals.path_paint_base + index) * 36u);
+    var cursor = instance_cursor((globals.path_paint_base + index) * 40u);
     return PathPaint(
         read_bounds(&cursor),
         read_content_mask(&cursor),
@@ -258,7 +262,7 @@ fn load_path_paint(index: u32) -> PathPaint {
 }
 
 fn load_underline(instance_id: u32) -> Underline {
-    var cursor = instance_cursor(instance_id * 24u);
+    var cursor = instance_cursor(instance_id * 28u);
     return Underline(
         read_word(&cursor),
         read_word(&cursor),
@@ -271,7 +275,7 @@ fn load_underline(instance_id: u32) -> Underline {
 }
 
 fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
-    var cursor = instance_cursor(instance_id * 36u);
+    var cursor = instance_cursor(instance_id * 40u);
     return MonochromeSprite(
         read_word(&cursor),
         read_word(&cursor),
@@ -284,7 +288,7 @@ fn load_mono_sprite(instance_id: u32) -> MonochromeSprite {
 }
 
 fn load_poly_sprite(instance_id: u32) -> PolychromeSprite {
-    var cursor = instance_cursor(instance_id * 32u);
+    var cursor = instance_cursor(instance_id * 36u);
     return PolychromeSprite(
         read_word(&cursor),
         read_word(&cursor),

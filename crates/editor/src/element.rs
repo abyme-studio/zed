@@ -11686,6 +11686,7 @@ mod tests {
                     bottom_right: Pixels::ZERO,
                     bottom_left: Pixels::ZERO,
                 },
+                ..Default::default()
             },
             behavior: HitboxBehavior::Normal,
         }

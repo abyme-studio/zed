@@ -35,12 +35,14 @@ struct Corners {
     float bottom_left;
 };
 
-// GPUI's `ContentMask`, in its layout. Direct3D clips to `bounds` only: the rounded rectangle is
-// cut on Metal and wgpu.
+// GPUI's `ContentMask`, in its layout. Direct3D clips to `bounds` only: the rounded rectangle and
+// the fade are drawn on Metal and wgpu.
 struct ContentMask {
     Bounds bounds;
     Bounds rounded;
     Corners corner_radii;
+    float2 fade_from;
+    float2 fade_to;
 };
 
 struct Edges {

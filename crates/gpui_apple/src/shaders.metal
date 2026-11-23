@@ -1280,13 +1280,28 @@ float4 content_mask_radii(ContentMask_ScaledPixels mask) {
                 mask.corner_radii.bottom_right, mask.corner_radii.bottom_left);
 }
 
+// Whether a content mask cuts more than its rectangle: a rounded rectangle or a fade.
 bool has_rounded_mask(ContentMask_ScaledPixels mask) {
-  return any(content_mask_radii(mask) != float4(0.));
+  return any(content_mask_radii(mask) != float4(0.)) ||
+         mask.fade_from.x != mask.fade_to.x || mask.fade_from.y != mask.fade_to.y;
 }
 
-// How much of a point a content mask's rounded rectangle keeps: 1 inside, 0 past its curve.
+// How much of a point a content mask's linear fade keeps: 1 up to `fade_from`, 0 from `fade_to`.
+float fade_alpha(float2 point, float2 from, float2 to) {
+  float2 d = to - from;
+  float len2 = dot(d, d);
+  if (len2 == 0.) {
+    return 1.;
+  }
+  return 1. - saturate(dot(point - from, d) / len2);
+}
+
+// How much of a point a content mask keeps: its rounded rectangle, 1 inside and 0 past its curve,
+// times its fade.
 float content_mask_alpha(float2 point, ContentMask_ScaledPixels mask) {
-  return rounded_rect_alpha(point, content_mask_rect(mask), content_mask_radii(mask));
+  return rounded_rect_alpha(point, content_mask_rect(mask), content_mask_radii(mask)) *
+         fade_alpha(point, float2(mask.fade_from.x, mask.fade_from.y),
+                    float2(mask.fade_to.x, mask.fade_to.y));
 }
 
 // Signed distance of the point to the quad's border - positive outside the
