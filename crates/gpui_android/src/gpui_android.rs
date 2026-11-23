@@ -9,6 +9,8 @@
 #[cfg(target_os = "android")]
 pub mod android;
 
+pub mod motion;
+
 #[cfg(target_os = "android")]
 pub use android::{AndroidPlatform, activity, assets, current_platform, files_dir, start, vm};
 /// Every window's view, the activity's own (id 0) and each after it, and the activity's lifecycle.

@@ -25,8 +25,14 @@ pub(crate) enum Told {
     Surface(u64, NativeWindow),
     Gone(u64, mpsc::Sender<()>),
     Resized(u64),
-    /// A pointer of a touch, with `MotionEvent`'s tool type and the contact's axes in device pixels.
-    Touch { id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, tool: i32, major: f32, minor: f32 },
+    /// A pointer of a touch, with `MotionEvent`'s tool type and the contact's axes in device pixels,
+    /// and its samples since the last delivery, oldest first, the event's own last.
+    Touch { id: u64, pointer: i32, phase: TouchPhase, tool: i32, major: f32, minor: f32, samples: Vec<Sample> },
+    /// A pen or mouse above the view with no button down (`onHoverEvent`): `exit` once it leaves.
+    Hover { id: u64, tool: i32, exit: bool, meta: u32, sample: Sample },
+    /// A wheel or a trackpad's scroll (`onGenericMotionEvent`'s `ACTION_SCROLL`), in lines:
+    /// `MotionEvent`'s `AXIS_HSCROLL` and `AXIS_VSCROLL`, at (x, y) in device pixels.
+    Scroll { id: u64, x: f32, y: f32, h: f32, v: f32, meta: u32 },
     /// The bars and cutout, then the keyboard, in device pixels: left, top, right, bottom.
     Insets(u64, [i32; 4], [i32; 4]),
     Focus(u64, bool),
@@ -168,9 +174,27 @@ pub fn resized(id: u64) {
 
 /// A touch on window `id`, in its surface's pixels: `tool` is `MotionEvent.getToolType`, `major` and
 /// `minor` its contact's axes (`getTouchMajor`, `getTouchMinor`), 0 when not reported.
-#[allow(clippy::too_many_arguments)]
-pub fn touch(id: u64, pointer: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, tool: i32, major: f32, minor: f32) {
-    tell(Told::Touch { id, pointer, phase, x, y, pressure, tool, major, minor });
+pub use super::input::Sample;
+
+/// A pointer of a touch on window `id` (`AbymeView.onTouchEvent`): `MotionEvent`'s tool type, the
+/// contact's axes in device pixels, and its samples since the last delivery, oldest first and the
+/// event's own last (`getHistorical*`), at least one.
+pub fn touch(id: u64, pointer: i32, phase: TouchPhase, tool: i32, major: f32, minor: f32, samples: Vec<Sample>) {
+    if samples.is_empty() {
+        return;
+    }
+    tell(Told::Touch { id, pointer, phase, tool, major, minor, samples });
+}
+
+/// A pen or mouse hovering window `id` with no button down (`onHoverEvent`), `exit` once it left.
+pub fn hover(id: u64, tool: i32, exit: bool, meta: u32, sample: Sample) {
+    tell(Told::Hover { id, tool, exit, meta, sample });
+}
+
+/// A wheel's or trackpad's scroll on window `id` at (x, y) in device pixels, in `MotionEvent`'s
+/// `AXIS_HSCROLL` and `AXIS_VSCROLL` lines (vertical +1 a notch away from the person).
+pub fn scroll(id: u64, x: f32, y: f32, h: f32, v: f32, meta: u32) {
+    tell(Told::Scroll { id, x, y, h, v, meta });
 }
 
 /// The activity's lifecycle (`Windows.life`), from any thread.
