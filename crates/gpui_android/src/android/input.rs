@@ -1,10 +1,15 @@
-//! A view's input as GPUI's: touches as `PlatformInput::Touch`, keys as key down and up with the
-//! characters the view read from Android's `KeyEvent`.
+//! A view's input as GPUI's: touches as `PlatformInput::Touch` with every sample since the last
+//! delivery and a pen's tilt, a hovering pen or mouse as mouse moves with no button, a wheel as
+//! scrolls, and keys as key down and up with the characters the view read from Android's
+//! `KeyEvent`.
 
 use gpui::{
-    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, PlatformInput, Point, TouchEvent, TouchId,
-    TouchPhase, px,
+    KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseExitEvent, MouseMoveEvent, PlatformInput,
+    Point, TouchPhase, px,
 };
+
+pub use crate::motion::Sample;
+use crate::motion::{scroll_event, touch_event};
 
 use super::window::AndroidWindowState;
 
@@ -70,7 +75,7 @@ pub(crate) fn told_key(window: &AndroidWindowState, code: u32, meta: u32, down: 
     key(window, code, meta, down, repeat, character(typed), character(bare));
 }
 
-fn position(x: f32, y: f32, scale: f32) -> Point<gpui::Pixels> {
+pub(crate) fn position(x: f32, y: f32, scale: f32) -> Point<gpui::Pixels> {
     Point { x: px(x / scale), y: px(y / scale) }
 }
 
@@ -95,30 +100,48 @@ impl Contact {
     }
 }
 
-pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, x: f32, y: f32, pressure: f32, scale: f32, contact: Contact) {
-    let force = (pressure > 0.0).then_some(pressure.clamp(0.0, 1.0));
-    let event = TouchEvent {
-        id: TouchId(id as u64),
-        phase,
-        position: position(x, y, scale),
-        predicted_position: None,
-        force,
-        tilt: None,
-        coalesced: Vec::new(),
-    };
+pub(crate) fn touch(window: &AndroidWindowState, id: i32, phase: TouchPhase, samples: &[Sample], scale: f32, contact: Contact) {
+    let Some(event) = touch_event(id, phase, samples, scale) else { return };
     window.mouse_position.set(event.position);
     window.pointer.set(Some(gpui::PointerInfo {
         kind: contact.kind,
         id: id.max(0) as u64,
         width: contact.major.max(0.0) / scale,
         height: contact.minor.max(0.0) / scale,
-        pressure: force,
-        tilt: None,
+        pressure: event.force,
+        tilt: event.tilt,
     }));
     window.input_callback.with(|callback| callback(PlatformInput::Touch(event)));
 }
 
-fn modifiers(state: u32) -> Modifiers {
+/// A pen or mouse above the view with no button down: a mouse move whose pointer says which, as
+/// iOS's hover; `exit` once it left.
+pub(crate) fn hover(window: &AndroidWindowState, tool: i32, exit: bool, meta: u32, sample: Sample, scale: f32) {
+    let position = position(sample.x, sample.y, scale);
+    let modifiers = modifiers(meta);
+    window.mouse_position.set(position);
+    window.modifiers.set(modifiers);
+    window.pointer.set(Some(gpui::PointerInfo {
+        kind: Contact::of(tool, 0.0, 0.0).kind,
+        tilt: sample.tilt(),
+        ..Default::default()
+    }));
+    let input = if exit {
+        PlatformInput::MouseExited(MouseExitEvent { position, pressed_button: None, modifiers })
+    } else {
+        PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers })
+    };
+    window.input_callback.with(|callback| callback(input));
+}
+
+pub(crate) fn scroll(window: &AndroidWindowState, x: f32, y: f32, h: f32, v: f32, meta: u32, scale: f32) {
+    let event = scroll_event(x, y, h, v, modifiers(meta), scale);
+    window.mouse_position.set(event.position);
+    window.modifiers.set(event.modifiers);
+    window.input_callback.with(|callback| callback(PlatformInput::Scroll(event)));
+}
+
+pub(crate) fn modifiers(state: u32) -> Modifiers {
     let on = |bit: u32| state & bit != 0;
     Modifiers {
         control: on(meta::CTRL),
@@ -206,3 +229,4 @@ fn key(window: &AndroidWindowState, key: u32, meta: u32, down: bool, repeat: i32
     };
     matches!(window.input_callback.with(|callback| callback(input)), Some(result) if !result.propagate)
 }
+
