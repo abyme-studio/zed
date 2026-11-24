@@ -141,6 +141,16 @@ pub(crate) fn scroll(window: &AndroidWindowState, x: f32, y: f32, h: f32, v: f32
     window.input_callback.with(|callback| callback(PlatformInput::Scroll(event)));
 }
 
+/// Files dropped at (x, y): Android hands their contents only on the drop, so GPUI hears them enter
+/// and land at once, as a drop from Finder ends on the Mac.
+pub(crate) fn dropped(window: &AndroidWindowState, x: f32, y: f32, paths: Vec<std::path::PathBuf>, scale: f32) {
+    let position = position(x, y, scale);
+    window.mouse_position.set(position);
+    let entered = PlatformInput::FileDrop(gpui::FileDropEvent::Entered { position, paths: gpui::ExternalPaths(paths.into()) });
+    window.input_callback.with(|callback| callback(entered));
+    window.input_callback.with(|callback| callback(PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position })));
+}
+
 pub(crate) fn modifiers(state: u32) -> Modifiers {
     let on = |bit: u32| state & bit != 0;
     Modifiers {

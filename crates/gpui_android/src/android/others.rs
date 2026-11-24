@@ -8,7 +8,7 @@
 //! queued here and handled on GPUI's thread at its next wake. A surface going away waits until GPUI
 //! has let go of it.
 //!
-//! Its keys and the IME's edits come the same way (`key`, `edit`, `action`), and GPUI says what its
+//! Its keys, the IME's edits and files dropped on it come the same way (`key`, `edit`, `action`, `dropped`), and GPUI says what its
 //! keyboard should show back to the view, and where its caret is (`on_keyboard`). Only the activity's own window has a
 //! TalkBack tree yet.
 
@@ -33,6 +33,9 @@ pub(crate) enum Told {
     /// A wheel or a trackpad's scroll (`onGenericMotionEvent`'s `ACTION_SCROLL`), in lines:
     /// `MotionEvent`'s `AXIS_HSCROLL` and `AXIS_VSCROLL`, at (x, y) in device pixels.
     Scroll { id: u64, x: f32, y: f32, h: f32, v: f32, meta: u32 },
+    /// Files dropped on the view (`onDragEvent`'s `ACTION_DROP`) at (x, y) in device pixels, each
+    /// copied by the app to a path of its own.
+    Drop { id: u64, x: f32, y: f32, paths: Vec<std::path::PathBuf> },
     /// The bars and cutout, then the keyboard, in device pixels: left, top, right, bottom.
     Insets(u64, [i32; 4], [i32; 4]),
     Focus(u64, bool),
@@ -195,6 +198,13 @@ pub fn hover(id: u64, tool: i32, exit: bool, meta: u32, sample: Sample) {
 /// `AXIS_HSCROLL` and `AXIS_VSCROLL` lines (vertical +1 a notch away from the person).
 pub fn scroll(id: u64, x: f32, y: f32, h: f32, v: f32, meta: u32) {
     tell(Told::Scroll { id, x, y, h, v, meta });
+}
+
+/// Files dropped on window `id` at (x, y) in device pixels, as paths the app copied them to.
+pub fn dropped(id: u64, x: f32, y: f32, paths: Vec<std::path::PathBuf>) {
+    if !paths.is_empty() {
+        tell(Told::Drop { id, x, y, paths });
+    }
 }
 
 /// The activity's lifecycle (`Windows.life`), from any thread.

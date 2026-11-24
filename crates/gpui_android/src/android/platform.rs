@@ -217,6 +217,11 @@ impl AndroidPlatformState {
                     input::scroll(&window, x, y, h, v, meta, scale);
                 }
             }
+            Told::Drop { id, x, y, paths } => {
+                if let Some(window) = self.by_id(id) {
+                    input::dropped(&window, x, y, paths, scale);
+                }
+            }
             Told::Insets(id, safe, ime) => {
                 let insets = others::as_insets(safe, ime, scale);
                 if id == 0 {
