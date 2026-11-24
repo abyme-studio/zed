@@ -448,14 +448,18 @@ impl WgpuContext {
     async fn create_device(
         adapter: &wgpu::Adapter,
     ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
-        let dual_source_blending = adapter
-            .features()
-            .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+        // Android draws no subpixel text (gpui_android's window says so), and Adreno's Vulkan
+        // driver fails to link the subpixel pipeline's dual-source shader: wgpu reads that
+        // failure as a lost device, and every recovery rebuilds the pipeline and loses it again.
+        let dual_source_blending = !cfg!(target_os = "android")
+            && adapter
+                .features()
+                .contains(wgpu::Features::DUAL_SOURCE_BLENDING);
 
         let mut required_features = wgpu::Features::empty();
         if dual_source_blending {
             required_features |= wgpu::Features::DUAL_SOURCE_BLENDING;
-        } else {
+        } else if !cfg!(target_os = "android") {
             log::warn!(
                 "Dual-source blending not available on this GPU. \
                 Subpixel text antialiasing will be disabled."
