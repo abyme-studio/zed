@@ -88,8 +88,10 @@ pub enum Keyboard {
     Show,
     /// No input has focus: the keyboard goes.
     Hide,
-    /// The focused input's kind: `EditorInfo.inputType` and the action's `imeOptions`.
-    Editor { input_type: u32, action: u32 },
+    /// The focused input's kind: `EditorInfo.inputType`, the action's `imeOptions`, and what its
+    /// text is for autofill, an HTML `autocomplete` value (`TextInputConfiguration::autocomplete`,
+    /// empty for none). The view offers Android's autofill for it.
+    Editor { input_type: u32, action: u32, autocomplete: String },
     /// The focused input's text around the caret, its selection and composing region (UTF-16),
     /// after the view's edit `seq` (`edit`): the view drops it if it has edited since.
     State { seq: u32, state: TextInputState },

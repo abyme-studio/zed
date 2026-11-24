@@ -129,8 +129,9 @@ impl Keyboard {
         super::others::keyboard(self.id, super::others::Keyboard::Hide);
     }
 
-    fn editor(self, input_type: InputType, action: u32) {
-        super::others::keyboard(self.id, super::others::Keyboard::Editor { input_type: input_type.bits(), action });
+    fn editor(self, input_type: InputType, action: u32, autocomplete: &str) {
+        let autocomplete = autocomplete.to_string();
+        super::others::keyboard(self.id, super::others::Keyboard::Editor { input_type: input_type.bits(), action, autocomplete });
     }
 
     fn state(self, seq: u32, state: TextInputState) {
@@ -222,7 +223,7 @@ impl TextInput {
             TextInputAction::Search => ime::SEARCH,
             TextInputAction::Send => ime::SEND,
         };
-        keyboard.editor(input_type, action);
+        keyboard.editor(input_type, action, &configuration.autocomplete);
         self.configuration.replace(configuration);
     }
 
