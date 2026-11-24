@@ -827,6 +827,7 @@ impl WgpuRendererCore {
                                color_targets: &[Option<wgpu::ColorTargetState>],
                                depth_write_enabled: bool,
                                module: &wgpu::ShaderModule| {
+            log::warn!("DIAG pipeline {name} vs={vs_entry} fs={fs_entry} dual={dual_source_blending}");
             let mut bind_group_layouts = vec![Some(globals_layout), Some(data_layout)];
             bind_group_layouts.extend(texture_layout.map(Some));
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

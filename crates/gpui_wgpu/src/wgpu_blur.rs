@@ -161,6 +161,7 @@ impl Backdrop {
             immediate_size: 0,
         });
         let pipeline = |entry: &str, blend: Option<wgpu::BlendState>| {
+            log::warn!("DIAG blur pipeline {entry}");
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
