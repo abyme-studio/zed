@@ -2,14 +2,14 @@ use super::{CallbackSlot, platform::IosPlatformState, window::IosWindowState};
 use gpui::{AppLifecyclePhase, WindowVisibility};
 use gpui_apple::main_thread_marker;
 use objc2::{
-    ClassType, DefinedClass, MainThreadOnly, Message, define_class, extern_class, extern_methods,
+    AnyThread, ClassType, DefinedClass, MainThreadOnly, Message, define_class, extern_class, extern_methods,
     msg_send,
     rc::{Allocated, Retained},
     runtime::AnyObject,
     sel,
 };
 use objc2_foundation::{
-    NSDictionary, NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSSet, NSString,
+    NSData, NSDictionary, NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes, NSSet, NSString,
     NSUserActivity, NSUserActivityTypeBrowsingWeb,
 };
 use objc2_quartz_core::CADisplayLink;
@@ -41,6 +41,58 @@ thread_local! {
     // UIKit constructs delegates by class name, including on scene restoration.
     // Only delegate initialization and the legacy status-bar setter consult this.
     static CURRENT_PLATFORM: RefCell<Weak<IosPlatformState>> = RefCell::default();
+}
+
+/// The app's own state, kept in the scene's restoration activity so it outlives the process: what
+/// the last scene saved, given back when the system reconnects it.
+#[derive(Default)]
+struct SavedState {
+    restored: Option<Vec<u8>>,
+    save: Option<Box<dyn Fn() -> Option<Vec<u8>>>>,
+}
+
+thread_local! {
+    static SAVED_STATE: RefCell<SavedState> = RefCell::default();
+}
+
+const SAVED_STATE_ACTIVITY: &str = "dev.gpui.saved-state";
+const SAVED_STATE_KEY: &str = "bytes";
+
+/// The bytes the scene's restoration activity held as it connected, once; `None` on a fresh start.
+/// Read before the app's launch callback runs, so the app can take them before it draws.
+pub fn take_restored_state() -> Option<Vec<u8>> {
+    SAVED_STATE.with_borrow_mut(|state| state.restored.take())
+}
+
+/// What the scene keeps when UIKit asks for its restoration activity (as it goes to the background):
+/// `save`'s bytes, or nothing when it answers `None`.
+pub fn set_save_state(save: impl Fn() -> Option<Vec<u8>> + 'static) {
+    SAVED_STATE.with_borrow_mut(|state| state.save = Some(Box::new(save)));
+}
+
+fn restored_bytes(session: &UISceneSession) -> Option<Vec<u8>> {
+    let activity = session.stateRestorationActivity()?;
+    if activity.activityType().to_string() != SAVED_STATE_ACTIVITY {
+        return None;
+    }
+    let info = activity.userInfo()?;
+    let value = info.objectForKey(&NSString::from_str(SAVED_STATE_KEY))?;
+    let data = value.downcast::<NSData>().ok()?;
+    Some(data.to_vec())
+}
+
+fn saved_activity() -> Option<Retained<NSUserActivity>> {
+    let bytes = SAVED_STATE.with_borrow(|state| state.save.as_ref().and_then(|save| save()))?;
+    let activity = NSUserActivity::initWithActivityType(
+        NSUserActivity::alloc(),
+        &NSString::from_str(SAVED_STATE_ACTIVITY),
+    );
+    let key = NSString::from_str(SAVED_STATE_KEY);
+    let info = NSDictionary::<NSString, NSData>::from_retained_objects(&[&*key], &[NSData::with_bytes(&bytes)]);
+    // SAFETY: a dictionary of strings to data is a dictionary of objects, which userInfo takes.
+    let info: Retained<NSDictionary> = unsafe { Retained::cast_unchecked(info) };
+    unsafe { activity.setUserInfo(Some(&info)) };
+    Some(activity)
 }
 
 pub(super) fn current_platform() -> Option<Rc<IosPlatformState>> {
@@ -301,12 +353,16 @@ define_class!(
         fn will_connect(
             &self,
             scene: &UIScene,
-            _session: &UISceneSession,
+            session: &UISceneSession,
             options: &SceneConnectionOptions,
         ) {
             let Some(scene) = scene.downcast_ref::<UIWindowScene>() else {
                 return;
             };
+            // Before the launch callback, which may start what reads them.
+            if let Some(bytes) = restored_bytes(session) {
+                SAVED_STATE.with_borrow_mut(|state| state.restored = Some(bytes));
+            }
             let Some(platform) = self.ivars().upgrade() else {
                 return;
             };
@@ -386,6 +442,11 @@ define_class!(
             if let Some(platform) = self.platform_for_scene(scene) {
                 platform.application.open_urls(contexts);
             }
+        }
+
+        #[unsafe(method_id(stateRestorationActivityForScene:))]
+        fn state_restoration_activity(&self, scene: &UIScene) -> Option<Retained<NSUserActivity>> {
+            self.platform_for_scene(scene).and_then(|_| saved_activity())
         }
 
         #[unsafe(method(scene:continueUserActivity:))]
