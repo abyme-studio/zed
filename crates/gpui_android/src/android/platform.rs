@@ -20,7 +20,7 @@ use gpui::{
     DummyKeyboardMapper, ForegroundExecutor, Keymap, Menu, MenuItem, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, PriorityQueueReceiver, Result, RunnableVariant, Task, ThermalState,
-    Point, WindowAppearance, WindowParams, point,
+    Point, WindowAppearance, WindowInsets, WindowParams, point,
 };
 use gpui_wgpu::{CosmicTextSystem, GpuContext};
 
@@ -102,6 +102,9 @@ pub(crate) struct AndroidPlatformState {
     /// The activity's own surface's top left on the screen, as last told: kept for its window,
     /// which may open after the app first tells it.
     main_origin: Cell<Point<DevicePixels>>,
+    /// The activity's own view's insets, as last told: kept for its window, which may open after
+    /// the view first tells them, and Android tells them again only when they change.
+    main_insets: RefCell<Option<WindowInsets>>,
     destroyed: Cell<bool>,
     appearance: Cell<WindowAppearance>,
     /// The item GPUI last wrote, kept for its metadata: the system clipboard holds text alone.
@@ -139,6 +142,7 @@ impl AndroidPlatform {
             others: RefCell::new(Vec::new()),
             next_other: Cell::new(1),
             main_origin: Cell::new(Point::default()),
+            main_insets: RefCell::new(None),
             destroyed: Cell::new(false),
             appearance: Cell::new(appearance),
             clipboard: RefCell::new(None),
@@ -214,8 +218,12 @@ impl AndroidPlatformState {
                 }
             }
             Told::Insets(id, safe, ime) => {
+                let insets = others::as_insets(safe, ime, scale);
+                if id == 0 {
+                    self.main_insets.replace(Some(insets.clone()));
+                }
                 if let Some(window) = self.by_id(id) {
-                    window.set_insets(others::as_insets(safe, ime, scale));
+                    window.set_insets(insets);
                 }
             }
             Told::Placed(id, x, y) => {
@@ -414,6 +422,9 @@ impl Platform for AndroidPlatform {
         let surface = self.0.main_surface.borrow_mut().take();
         let window = AndroidWindow::new(handle, options, self.0.gpu_context.clone(), None, surface)?;
         window.0.set_origin(self.0.main_origin.get());
+        if let Some(insets) = self.0.main_insets.borrow().clone() {
+            window.0.set_insets(insets);
+        }
         self.0.window.replace(Rc::downgrade(&window.0));
         Ok(Box::new(window))
     }
