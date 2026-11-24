@@ -50,6 +50,7 @@ impl<T> CallbackSlot<T> {
 
 pub(crate) use display::*;
 pub use platform::*;
+pub use application::{set_save_state, take_restored_state};
 pub use window::set_status_bar_style;
 pub(crate) use window::*;
 
