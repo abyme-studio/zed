@@ -20,7 +20,7 @@ use std::{
 use super::{LineWrapper, WrapOptions};
 
 /// A laid out and styled line of text
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct LineLayout {
     /// The font size for this line
     pub font_size: Pixels,
@@ -964,7 +964,7 @@ impl LineLayoutCache {
         } else {
             drop(state);
             let text = SharedString::from(text);
-            let unwrapped_layout = if inline_objects.is_empty() {
+            let mut unwrapped_layout = if inline_objects.is_empty() {
                 self.layout_line::<&SharedString>(&text, font_size, runs, None)
             } else {
                 self.layout_line_with_inline_objects::<&SharedString>(
@@ -974,6 +974,15 @@ impl LineLayoutCache {
                     inline_objects,
                 )
             };
+            if let Some(tab_size) = wrap_options.tab_size
+                && text.contains('\t')
+            {
+                let mut layout = LineLayout::clone(&unwrapped_layout);
+                apply_tab_size_to_layout(&mut layout, &text, tab_size, |font_id| {
+                    self.space_width(font_id, font_size)
+                });
+                unwrapped_layout = Arc::new(layout);
+            }
             let wrap_boundaries = match wrap_width {
                 Some(wrap_width) => unwrapped_layout.wrap(
                     text.as_ref(),
@@ -1119,6 +1128,17 @@ impl LineLayoutCache {
         }
     }
 
+    fn space_width(&self, font_id: FontId, font_size: Pixels) -> Pixels {
+        let Some(glyph_id) = self.platform_text_system.glyph_for_char(font_id, ' ') else {
+            return px(0.);
+        };
+        let Ok(advance) = self.platform_text_system.advance(font_id, glyph_id) else {
+            return px(0.);
+        };
+        let units_per_em = self.platform_text_system.font_metrics(font_id).units_per_em;
+        font_size * advance.width / units_per_em as f32
+    }
+
     fn clear_if_font_generation_changed(&self) -> usize {
         let font_generation = self.font_generation.load(Ordering::Acquire);
         if self.cached_font_generation.load(Ordering::Acquire) == font_generation {
@@ -1174,6 +1194,60 @@ fn apply_letter_spacing_to_layout(layout: &mut LineLayout, runs: &[FontRun]) {
     }
     if let Some(previous) = previous {
         offset += spacing_at(previous);
+    }
+    layout.width += offset;
+}
+
+// A tab advances to the next tab stop, a multiple of `tab_size` spaces of its run's font
+// from the line's start, as CSS `tab-size` does; a stop nearer than half a space is passed
+// for the one after it. The glyphs after the tab move by the change in its advance. A shaper
+// that gives a tab no glyph leaves it as shaped.
+fn apply_tab_size_to_layout(
+    layout: &mut LineLayout,
+    text: &str,
+    tab_size: u32,
+    space_width: impl Fn(FontId) -> Pixels,
+) {
+    let mut next_xs = Vec::new();
+    let glyphs: Vec<_> = layout
+        .runs
+        .iter()
+        .flat_map(|run| run.glyphs.iter().map(move |glyph| (run.font_id, glyph)))
+        .collect();
+    for (ix, (_, glyph)) in glyphs.iter().enumerate() {
+        let next_x = glyphs[ix + 1..]
+            .iter()
+            .find(|(_, next)| next.index != glyph.index)
+            .map_or(layout.width, |(_, next)| next.position.x);
+        next_xs.push(next_x);
+    }
+
+    let mut offset = px(0.);
+    let mut glyph_ix = 0;
+    let mut previous: Option<usize> = None;
+    for run in layout.runs.iter_mut() {
+        for glyph in run.glyphs.iter_mut() {
+            let shaped_x = glyph.position.x;
+            glyph.position.x += offset;
+            let first_of_its_index = previous != Some(glyph.index);
+            previous = Some(glyph.index);
+            if first_of_its_index && text.as_bytes().get(glyph.index) == Some(&b'\t') {
+                let space = space_width(run.font_id);
+                let stop = space * tab_size as f32;
+                let x = glyph.position.x;
+                let advance = if stop > px(0.) {
+                    let mut next_stop = stop * ((x / stop).floor() + 1.);
+                    if next_stop - x < space / 2. {
+                        next_stop += stop;
+                    }
+                    next_stop - x
+                } else {
+                    px(0.)
+                };
+                offset += advance - (next_xs[glyph_ix] - shaped_x);
+            }
+            glyph_ix += 1;
+        }
     }
     layout.width += offset;
 }
@@ -2130,5 +2204,64 @@ mod tests {
             wrap_indices(&shape("ab cd ef gh ij", TextWrapStyle::Balance, Some(2))),
             vec![12]
         );
+    }
+
+    #[test]
+    fn a_tab_advances_to_the_next_stop() {
+        // "a\tb" with the tab shaped 10 wide: stops every 4 spaces of 10.
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(10., 1), glyph_at(20., 2)]);
+        layout.width = px(30.);
+        apply_tab_size_to_layout(&mut layout, "a\tb", 4, |_| px(10.));
+        assert_eq!(glyph_x_positions(&layout), vec![0., 10., 40.]);
+        assert_eq!(layout.width, px(50.));
+
+        // A stop nearer than half a space is passed for the next one.
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(37., 1), glyph_at(47., 2)]);
+        layout.width = px(57.);
+        apply_tab_size_to_layout(&mut layout, "a\tb", 4, |_| px(10.));
+        assert_eq!(glyph_x_positions(&layout), vec![0., 37., 80.]);
+        assert_eq!(layout.width, px(90.));
+
+        // A size of 0 gives a tab no advance.
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(10., 1), glyph_at(20., 2)]);
+        layout.width = px(30.);
+        apply_tab_size_to_layout(&mut layout, "a\tb", 0, |_| px(10.));
+        assert_eq!(glyph_x_positions(&layout), vec![0., 10., 10.]);
+        assert_eq!(layout.width, px(20.));
+    }
+
+    #[test]
+    fn tab_size_reaches_the_shaped_text_and_keys_the_cache() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let text = SharedString::from("a\tb");
+        let runs = [TextRun {
+            len: text.len(),
+            font: font(".ZedMono"),
+            ..Default::default()
+        }];
+        let b_x = |tab_size| {
+            let lines = text_system
+                .shape_text_with_options(
+                    text.clone(),
+                    px(10.),
+                    &runs,
+                    None,
+                    None,
+                    &[],
+                    WrapOptions {
+                        tab_size,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            lines[0].layout.unwrapped_layout.x_for_index(2)
+        };
+
+        let shaped = b_x(None);
+        let em = shaped / 2.;
+        assert_eq!(b_x(Some(4)), em * 4.);
+        assert_eq!(b_x(Some(8)), em * 8.);
+        assert_eq!(b_x(None), shaped);
     }
 }

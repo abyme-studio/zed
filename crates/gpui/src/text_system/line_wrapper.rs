@@ -35,6 +35,8 @@ pub struct WrapOptions {
     pub word_break: WordBreak,
     /// How the paragraph chooses its breaks.
     pub text_wrap_style: TextWrapStyle,
+    /// A tab's advance in spaces, if not the platform's.
+    pub tab_size: Option<u32>,
 }
 
 /// The GPUI line wrapper, used to wrap lines of text to a given width.

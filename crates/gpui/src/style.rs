@@ -688,6 +688,11 @@ pub struct TextStyle {
 
     /// How a wrapped paragraph chooses its breaks
     pub text_wrap_style: TextWrapStyle,
+
+    /// A tab's advance, as CSS `tab-size`: a tab moves the text on to the next multiple of
+    /// this many spaces' width from the line's start. `None` leaves tabs as the platform
+    /// shapes them
+    pub tab_size: Option<u32>,
 }
 
 impl Default for TextStyle {
@@ -712,6 +717,7 @@ impl Default for TextStyle {
             letter_spacing: None,
             word_break: WordBreak::Normal,
             text_wrap_style: TextWrapStyle::Auto,
+            tab_size: None,
         }
     }
 }
@@ -790,6 +796,7 @@ impl TextStyle {
         WrapOptions {
             word_break: self.word_break,
             text_wrap_style: self.text_wrap_style,
+            tab_size: self.tab_size,
         }
     }
 }

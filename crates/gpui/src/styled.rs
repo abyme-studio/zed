@@ -99,6 +99,12 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Sets a tab's advance in the text to this many spaces, as CSS `tab-size`.
+    fn tab_size(mut self, spaces: u32) -> Self {
+        self.text_style().tab_size = Some(spaces);
+        self
+    }
+
     /// Sets the truncate overflowing text with an ellipsis (…) at the end if needed.
     /// [Docs](https://tailwindcss.com/docs/text-overflow#ellipsis)
     fn text_ellipsis(mut self) -> Self {

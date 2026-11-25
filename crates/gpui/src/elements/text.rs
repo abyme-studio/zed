@@ -819,13 +819,14 @@ impl TextLayout {
                             )
                         } else if let Some(unclipped) = window
                             .text_system()
-                            .shape_text_with_inline_objects(
+                            .shape_text_with_options(
                                 text.clone(),
                                 font_size,
                                 &runs,
                                 None,
                                 None,
                                 &inline_objects,
+                                text_style.wrap_options(),
                             )
                             .log_err()
                             && unclipped
