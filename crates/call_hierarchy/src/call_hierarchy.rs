@@ -1231,6 +1231,7 @@ fn shaped_width(
         background_color: None,
         underline: None,
         strikethrough: None,
+        letter_spacing: None,
     };
     window
         .text_system()

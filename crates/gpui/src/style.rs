@@ -480,6 +480,10 @@ pub struct TextStyle {
 
     /// The number of lines to display before truncating the text
     pub line_clamp: Option<usize>,
+
+    /// Extra space added after each character, in pixels, as CSS `letter-spacing`.
+    /// Negative values tighten the text.
+    pub letter_spacing: Option<Pixels>,
 }
 
 impl Default for TextStyle {
@@ -501,6 +505,7 @@ impl Default for TextStyle {
             text_overflow: None,
             text_align: TextAlign::default(),
             line_clamp: None,
+            letter_spacing: None,
         }
     }
 }
@@ -570,6 +575,7 @@ impl TextStyle {
             background_color: self.background_color,
             underline: self.underline,
             strikethrough: self.strikethrough,
+            letter_spacing: self.letter_spacing,
         }
     }
 }

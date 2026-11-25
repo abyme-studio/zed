@@ -2101,6 +2101,7 @@ mod tests {
                     background_color: Some(hsla(0.5, 0.5, 0.5, 1.0)),
                     underline: Some(underline_style),
                     strikethrough: None,
+                    letter_spacing: None,
                 }];
                 let inline_objects = [InlineObject {
                     range: 1..4,

@@ -291,6 +291,7 @@ impl Render for InlineObjectsBenchView {
                         background_color: None,
                         underline: None,
                         strikethrough: None,
+                        letter_spacing: None,
                     };
                     root = root.child(StyledText::new(text).with_runs(vec![run]));
                 }
@@ -303,6 +304,7 @@ impl Render for InlineObjectsBenchView {
                         background_color: None,
                         underline: None,
                         strikethrough: None,
+                        letter_spacing: None,
                     };
                     let objects = paragraph.inline_objects_variants[variant].clone();
                     let painted_objects = self.painted_objects.clone();
@@ -328,6 +330,7 @@ impl Render for InlineObjectsBenchView {
                                     background_color: None,
                                     underline: None,
                                     strikethrough: None,
+                                    letter_spacing: None,
                                 };
                                 row = row.child(StyledText::new(word.clone()).with_runs(vec![run]));
                             }
@@ -358,6 +361,7 @@ impl Render for InlineObjectsBenchView {
                                         background_color: None,
                                         underline: None,
                                         strikethrough: None,
+                                        letter_spacing: None,
                                     };
                                     row = row.child(
                                         div().flex().items_center().child(box_canvas).child(

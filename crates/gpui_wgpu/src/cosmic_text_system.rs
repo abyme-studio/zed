@@ -1105,6 +1105,7 @@ fn clip_font_runs(font_runs: &[FontRun], range: Range<usize>) -> SmallVec<[FontR
             clipped.push(FontRun {
                 len: end - start,
                 font_id: run.font_id,
+                letter_spacing: run.letter_spacing,
             });
         }
     }
@@ -1519,6 +1520,7 @@ mod tests {
         let runs = [FontRun {
             len: text.len(),
             font_id,
+            letter_spacing: None,
         }];
         Ok(text_system.layout_line(text, gpui::px(14.0), &runs))
     }
@@ -1614,6 +1616,7 @@ mod tests {
         let runs = [FontRun {
             len: text.len(),
             font_id,
+            letter_spacing: None,
         }];
 
         let missing_glyphs = text_system
@@ -1743,10 +1746,12 @@ mod tests {
             FontRun {
                 len: "ab\u{001c}\u{05d0}".len(),
                 font_id,
+                letter_spacing: None,
             },
             FontRun {
                 len: "\u{05d1}".len(),
                 font_id,
+                letter_spacing: None,
             },
         ];
         let layout = text_system.layout_line(text, gpui::px(14.0), &runs);
@@ -1844,10 +1849,12 @@ mod tests {
             FontRun {
                 len: 3,
                 font_id: fid(1),
+                letter_spacing: None,
             },
             FontRun {
                 len: 4,
                 font_id: fid(2),
+                letter_spacing: None,
             },
         ];
 
@@ -1857,11 +1864,13 @@ mod tests {
             &[
                 FontRun {
                     len: 1,
-                    font_id: fid(1)
+                    font_id: fid(1),
+                    letter_spacing: None,
                 },
                 FontRun {
                     len: 2,
-                    font_id: fid(2)
+                    font_id: fid(2),
+                    letter_spacing: None,
                 },
             ]
         );
@@ -1869,7 +1878,8 @@ mod tests {
             clip_font_runs(&runs, 3..7).as_slice(),
             &[FontRun {
                 len: 4,
-                font_id: fid(2)
+                font_id: fid(2),
+                letter_spacing: None,
             }]
         );
         assert!(clip_font_runs(&runs, 5..5).is_empty());

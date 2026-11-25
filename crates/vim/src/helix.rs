@@ -1364,6 +1364,7 @@ impl Vim {
                 background_color: None,
                 underline: None,
                 strikethrough: None,
+                letter_spacing: None,
             };
 
             text_system.layout_line(text, font_size, &[run], None).width
