@@ -3225,6 +3225,58 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
+
+    /// A cursor indicating that help is available
+    /// corresponds to the CSS cursor value `help`
+    Help,
+
+    /// A cursor indicating that the program is busy, but can still be used
+    /// corresponds to the CSS cursor value `progress`
+    Progress,
+
+    /// A cursor indicating that the program is busy
+    /// corresponds to the CSS cursor value `wait`
+    Wait,
+
+    /// A cursor indicating that a cell or set of cells may be selected
+    /// corresponds to the CSS cursor value `cell`
+    Cell,
+
+    /// A cursor indicating that something is to be moved
+    /// corresponds to the CSS cursor value `move`
+    Move,
+
+    /// A cursor indicating that the dragged item cannot be dropped here
+    /// corresponds to the CSS cursor value `no-drop`
+    NoDrop,
+
+    /// A cursor indicating that something can be scrolled in any direction
+    /// corresponds to the CSS cursor value `all-scroll`
+    AllScroll,
+
+    /// A cursor indicating that something can be zoomed in
+    /// corresponds to the CSS cursor value `zoom-in`
+    ZoomIn,
+
+    /// A cursor indicating that something can be zoomed out
+    /// corresponds to the CSS cursor value `zoom-out`
+    ZoomOut,
+
+    /// A resize up-left cursor
+    /// corresponds to the CSS cursor value `nw-resize`
+    ResizeUpLeft,
+
+    /// A resize up-right cursor
+    /// corresponds to the CSS cursor value `ne-resize`
+    ResizeUpRight,
+
+    /// A resize down-left cursor
+    /// corresponds to the CSS cursor value `sw-resize`
+    ResizeDownLeft,
+
+    /// A resize down-right cursor
+    /// corresponds to the CSS cursor value `se-resize`
+    ResizeDownRight,
 }
 
 /// A clipboard item that should be copied to the clipboard

@@ -58,7 +58,8 @@ use parking_lot::Mutex;
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::{CStr, CString, c_void},
     mem,
     ops::Range,
@@ -2792,7 +2793,156 @@ pub(crate) unsafe fn native_cursor(style: CursorStyle) -> *mut AnyObject {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            CursorStyle::NoDrop => msg_send![class!(NSCursor), operationNotAllowedCursor],
+
+            // AppKit has the rest only as private class methods, so each is asked for if
+            // this macOS answers it, and otherwise drawn from an SF Symbol, as an image
+            // cursor. The nearest public cursor is the last resort.
+            _ => cached_cursor(style, || {
+                let (selector, symbol, fallback) = missing_cursor(style);
+                selector
+                    .and_then(|selector| private_cursor(selector))
+                    .or_else(|| symbol_cursor(symbol))
+                    .unwrap_or_else(|| native_cursor(fallback))
+            }),
         }
+    }
+}
+
+/// For a cursor AppKit has no public class method for: its private class method, the SF
+/// Symbol drawn when there is none, and the public cursor used when that fails too.
+fn missing_cursor(style: CursorStyle) -> (Option<Sel>, &'static str, CursorStyle) {
+    match style {
+        CursorStyle::Help => (
+            Some(sel!(_helpCursor)),
+            "questionmark.circle",
+            CursorStyle::Arrow,
+        ),
+        CursorStyle::Progress => (
+            Some(sel!(busyButClickableCursor)),
+            "clock",
+            CursorStyle::Arrow,
+        ),
+        CursorStyle::Wait => (Some(sel!(_waitCursor)), "clock", CursorStyle::Arrow),
+        CursorStyle::Cell => (Some(sel!(_cellCursor)), "plus", CursorStyle::Crosshair),
+        // `_moveCursor` is answered for but throws when called, so it is never asked for.
+        CursorStyle::Move | CursorStyle::AllScroll => (
+            None,
+            "arrow.up.and.down.and.arrow.left.and.right",
+            CursorStyle::OpenHand,
+        ),
+        CursorStyle::ZoomIn => (
+            Some(sel!(_zoomInCursor)),
+            "plus.magnifyingglass",
+            CursorStyle::Arrow,
+        ),
+        CursorStyle::ZoomOut => (
+            Some(sel!(_zoomOutCursor)),
+            "minus.magnifyingglass",
+            CursorStyle::Arrow,
+        ),
+        CursorStyle::ResizeUpLeft => (
+            Some(sel!(_windowResizeNorthWestCursor)),
+            "arrow.up.left",
+            CursorStyle::ResizeUpLeftDownRight,
+        ),
+        CursorStyle::ResizeUpRight => (
+            Some(sel!(_windowResizeNorthEastCursor)),
+            "arrow.up.right",
+            CursorStyle::ResizeUpRightDownLeft,
+        ),
+        CursorStyle::ResizeDownLeft => (
+            Some(sel!(_windowResizeSouthWestCursor)),
+            "arrow.down.left",
+            CursorStyle::ResizeUpRightDownLeft,
+        ),
+        CursorStyle::ResizeDownRight => (
+            Some(sel!(_windowResizeSouthEastCursor)),
+            "arrow.down.right",
+            CursorStyle::ResizeUpLeftDownRight,
+        ),
+        _ => (None, "", CursorStyle::Arrow),
+    }
+}
+
+thread_local! {
+    static CURSORS: RefCell<HashMap<CursorStyle, Retained<AnyObject>>> =
+        RefCell::new(HashMap::default());
+}
+
+/// A cursor made once per style and kept, as an image cursor is not one AppKit keeps.
+///
+/// # Safety
+///
+/// Must be called on the AppKit main thread.
+unsafe fn cached_cursor(
+    style: CursorStyle,
+    make: impl FnOnce() -> *mut AnyObject,
+) -> *mut AnyObject {
+    if let Some(cursor) = CURSORS.with_borrow(|cursors| cursors.get(&style).cloned()) {
+        return Retained::as_ptr(&cursor).cast_mut();
+    }
+    let cursor = make();
+    // SAFETY: `make` answers a valid NSCursor, autoreleased or kept by AppKit.
+    let Some(kept) = (unsafe { Retained::retain(cursor) }) else {
+        return cursor;
+    };
+    CURSORS.with_borrow_mut(|cursors| cursors.insert(style, kept));
+    cursor
+}
+
+/// The cursor a private `NSCursor` class method answers, if this macOS has it.
+///
+/// # Safety
+///
+/// Must be called on the AppKit main thread.
+unsafe fn private_cursor(selector: Sel) -> Option<*mut AnyObject> {
+    // SAFETY: `respondsToSelector:` is safe on any class, and a class method it answers for
+    // here takes no arguments and answers an NSCursor.
+    unsafe {
+        let responds: Bool = msg_send![class!(NSCursor), respondsToSelector: selector];
+        if !responds.as_bool() {
+            return None;
+        }
+        let cursor: *mut AnyObject = msg_send![class!(NSCursor), performSelector: selector];
+        (!cursor.is_null()).then_some(cursor)
+    }
+}
+
+/// An image cursor drawn from an SF Symbol, its hot spot at its centre, if this macOS has
+/// the symbol.
+///
+/// # Safety
+///
+/// Must be called on the AppKit main thread.
+unsafe fn symbol_cursor(symbol: &str) -> Option<*mut AnyObject> {
+    if symbol.is_empty() {
+        return None;
+    }
+    // SAFETY: Each message is sent to the class or object it is documented on, and the
+    // symbol image method is checked for first, as it is new in macOS 11.
+    unsafe {
+        let responds: Bool = msg_send![
+            class!(NSImage),
+            respondsToSelector: sel!(imageWithSystemSymbolName:accessibilityDescription:)
+        ];
+        if !responds.as_bool() {
+            return None;
+        }
+        let image: *mut AnyObject = msg_send![
+            class!(NSImage),
+            imageWithSystemSymbolName: ns_string(symbol),
+            accessibilityDescription: ptr::null_mut::<AnyObject>()
+        ];
+        if image.is_null() {
+            return None;
+        }
+        let size: NSSize = msg_send![image, size];
+        let hot_spot = NSPoint::new(size.width / 2., size.height / 2.);
+        let cursor: *mut AnyObject = msg_send![class!(NSCursor), alloc];
+        let cursor: *mut AnyObject = msg_send![cursor, initWithImage: image, hotSpot: hot_spot];
+        let cursor = Retained::from_raw(cursor)?;
+        Some(Retained::autorelease_ptr(cursor))
     }
 }
 
@@ -4336,6 +4486,37 @@ extern "C" fn toggle_tab_bar(this: &AnyObject, _sel: Sel, _id: *mut AnyObject) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn every_cursor_style_has_a_native_cursor() {
+        autoreleasepool(|_| unsafe {
+            // AppKit gives no cursors before the shared application exists.
+            let _: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let arrow = native_cursor(CursorStyle::Arrow);
+            for style in CursorStyle::iter() {
+                let cursor = native_cursor(style);
+                assert!(!cursor.is_null(), "{style:?} has no cursor");
+                let is_cursor: Bool = msg_send![cursor, isKindOfClass: class!(NSCursor)];
+                assert!(is_cursor.as_bool(), "{style:?} is not an NSCursor");
+                // A cursor made for a missing style is kept, not made again.
+                assert_eq!(native_cursor(style), cursor, "{style:?} was made twice");
+            }
+            for style in [
+                CursorStyle::Help,
+                CursorStyle::Move,
+                CursorStyle::ZoomIn,
+                CursorStyle::ZoomOut,
+                CursorStyle::Cell,
+            ] {
+                assert_ne!(
+                    native_cursor(style),
+                    arrow,
+                    "{style:?} fell back to the arrow"
+                );
+            }
+        });
+    }
 
     #[test]
     fn display_id_for_screen_handles_missing_metadata() {

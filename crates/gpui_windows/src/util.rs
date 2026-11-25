@@ -100,6 +100,10 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
     static SIZENWSE: OnceLock<SafeCursor> = OnceLock::new();
     static SIZENESW: OnceLock<SafeCursor> = OnceLock::new();
     static NO: OnceLock<SafeCursor> = OnceLock::new();
+    static HELP: OnceLock<SafeCursor> = OnceLock::new();
+    static APPSTARTING: OnceLock<SafeCursor> = OnceLock::new();
+    static WAIT: OnceLock<SafeCursor> = OnceLock::new();
+    static SIZEALL: OnceLock<SafeCursor> = OnceLock::new();
     let (lock, name) = match style {
         CursorStyle::IBeam | CursorStyle::IBeamCursorForVerticalLayout => (&IBEAM, IDC_IBEAM),
         CursorStyle::Crosshair => (&CROSS, IDC_CROSS),
@@ -112,9 +116,18 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
         | CursorStyle::ResizeDown
         | CursorStyle::ResizeUpDown
         | CursorStyle::ResizeRow => (&SIZENS, IDC_SIZENS),
-        CursorStyle::ResizeUpLeftDownRight => (&SIZENWSE, IDC_SIZENWSE),
-        CursorStyle::ResizeUpRightDownLeft => (&SIZENESW, IDC_SIZENESW),
-        CursorStyle::OperationNotAllowed => (&NO, IDC_NO),
+        CursorStyle::ResizeUpLeftDownRight
+        | CursorStyle::ResizeUpLeft
+        | CursorStyle::ResizeDownRight => (&SIZENWSE, IDC_SIZENWSE),
+        CursorStyle::ResizeUpRightDownLeft
+        | CursorStyle::ResizeUpRight
+        | CursorStyle::ResizeDownLeft => (&SIZENESW, IDC_SIZENESW),
+        CursorStyle::OperationNotAllowed | CursorStyle::NoDrop => (&NO, IDC_NO),
+        CursorStyle::Help => (&HELP, IDC_HELP),
+        CursorStyle::Progress => (&APPSTARTING, IDC_APPSTARTING),
+        CursorStyle::Wait => (&WAIT, IDC_WAIT),
+        CursorStyle::Move | CursorStyle::AllScroll => (&SIZEALL, IDC_SIZEALL),
+        CursorStyle::Cell => (&CROSS, IDC_CROSS),
         _ => (&ARROW, IDC_ARROW),
     };
     Some(

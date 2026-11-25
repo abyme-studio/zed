@@ -590,6 +590,19 @@ impl Platform for WebPlatform {
             CursorStyle::DragLink => "alias",
             CursorStyle::DragCopy => "copy",
             CursorStyle::ContextualMenu => "context-menu",
+            CursorStyle::Help => "help",
+            CursorStyle::Progress => "progress",
+            CursorStyle::Wait => "wait",
+            CursorStyle::Cell => "cell",
+            CursorStyle::Move => "move",
+            CursorStyle::NoDrop => "no-drop",
+            CursorStyle::AllScroll => "all-scroll",
+            CursorStyle::ZoomIn => "zoom-in",
+            CursorStyle::ZoomOut => "zoom-out",
+            CursorStyle::ResizeUpLeft => "nw-resize",
+            CursorStyle::ResizeUpRight => "ne-resize",
+            CursorStyle::ResizeDownLeft => "sw-resize",
+            CursorStyle::ResizeDownRight => "se-resize",
         };
 
         self.last_cursor_css.set(css_cursor);

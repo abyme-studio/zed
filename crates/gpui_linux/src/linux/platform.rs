@@ -1387,6 +1387,19 @@ pub(super) fn cursor_style_to_icon_names(style: CursorStyle) -> &'static [&'stat
         CursorStyle::DragLink => &["alias"],
         CursorStyle::DragCopy => &["copy"],
         CursorStyle::ContextualMenu => &["context-menu"],
+        CursorStyle::Help => &["help", "question_arrow", "whats_this"],
+        CursorStyle::Progress => &["progress", "left_ptr_watch", "half-busy"],
+        CursorStyle::Wait => &["wait", "watch"],
+        CursorStyle::Cell => &["cell", "plus"],
+        CursorStyle::Move => &["move", "fleur"],
+        CursorStyle::NoDrop => &["no-drop", "dnd-no-drop", "not-allowed", "crossed_circle"],
+        CursorStyle::AllScroll => &["all-scroll", "fleur"],
+        CursorStyle::ZoomIn => &["zoom-in"],
+        CursorStyle::ZoomOut => &["zoom-out"],
+        CursorStyle::ResizeUpLeft => &["nw-resize", "top_left_corner"],
+        CursorStyle::ResizeUpRight => &["ne-resize", "top_right_corner"],
+        CursorStyle::ResizeDownLeft => &["sw-resize", "bottom_left_corner"],
+        CursorStyle::ResizeDownRight => &["se-resize", "bottom_right_corner"],
     }
 }
 
