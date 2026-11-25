@@ -174,6 +174,142 @@ pub struct GridTemplate {
     pub min_size: GridTemplateMinSize,
 }
 
+/// One bound of a grid track's size, as a value of CSS's `minmax()`.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-template-columns#values)
+#[derive(Copy, Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridTrackBreadth {
+    /// A length, or a fraction of the grid container's size
+    Length(DefiniteLength),
+    /// A share of the free space, as CSS's `fr`. Only a maximum; as a minimum it is `Auto`
+    Flex(f32),
+    /// Sized by the items in the track
+    Auto,
+    /// The largest min-content size of the items in the track
+    MinContent,
+    /// The largest max-content size of the items in the track
+    MaxContent,
+    /// As `MaxContent`, but no larger than the length, as CSS's `fit-content()`.
+    /// Only a maximum; as a minimum it is `Auto`
+    FitContent(DefiniteLength),
+}
+
+/// The size of one grid track, as CSS's `minmax(min, max)`.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/minmax)
+#[derive(Copy, Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub struct GridTrack {
+    /// The smallest the track may be
+    pub min: GridTrackBreadth,
+    /// The largest the track may be
+    pub max: GridTrackBreadth,
+}
+
+impl GridTrack {
+    /// A track between `min` and `max`, as CSS's `minmax(min, max)`
+    pub fn minmax(min: GridTrackBreadth, max: GridTrackBreadth) -> Self {
+        Self { min, max }
+    }
+
+    /// A track of one size, as a single CSS track value. A `Flex` or `FitContent` value has
+    /// `Auto` as its minimum, as in CSS
+    pub fn single(breadth: GridTrackBreadth) -> Self {
+        let min = match breadth {
+            GridTrackBreadth::Flex(_) | GridTrackBreadth::FitContent(_) => GridTrackBreadth::Auto,
+            breadth => breadth,
+        };
+        Self { min, max: breadth }
+    }
+
+    /// A track of a fixed length, or a fraction of the grid container's size
+    pub fn length(length: impl Into<DefiniteLength>) -> Self {
+        Self::single(GridTrackBreadth::Length(length.into()))
+    }
+
+    /// A track taking `flex` shares of the free space, as CSS's `<flex>fr`
+    pub fn flex(flex: f32) -> Self {
+        Self::single(GridTrackBreadth::Flex(flex))
+    }
+
+    /// A track sized by its items, as CSS's `auto`
+    pub fn auto() -> Self {
+        Self::single(GridTrackBreadth::Auto)
+    }
+
+    /// A track as wide as its items' min-content size, as CSS's `min-content`
+    pub fn min_content() -> Self {
+        Self::single(GridTrackBreadth::MinContent)
+    }
+
+    /// A track as wide as its items' max-content size, as CSS's `max-content`
+    pub fn max_content() -> Self {
+        Self::single(GridTrackBreadth::MaxContent)
+    }
+
+    /// A track sized by its items up to `limit`, as CSS's `fit-content(limit)`
+    pub fn fit_content(limit: impl Into<DefiniteLength>) -> Self {
+        Self::single(GridTrackBreadth::FitContent(limit.into()))
+    }
+}
+
+/// How many times a `repeat()` in a grid template repeats its tracks.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/repeat)
+#[derive(Copy, Clone, PartialEq, Eq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridRepetition {
+    /// A fixed number of times
+    Count(u16),
+    /// As many times as fit the container, keeping empty tracks, as CSS's `auto-fill`
+    AutoFill,
+    /// As many times as fit the container, collapsing empty tracks, as CSS's `auto-fit`
+    AutoFit,
+}
+
+/// One entry of a grid template's track list: a track, or a `repeat()` of tracks.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-template-columns)
+#[derive(Clone, PartialEq, Debug, JsonSchema, Serialize, Deserialize)]
+pub enum GridTemplateEntry {
+    /// A single track
+    Track(GridTrack),
+    /// The tracks repeated, as CSS's `repeat(count, tracks)`
+    Repeat(GridRepetition, Vec<GridTrack>),
+}
+
+impl From<GridTrack> for GridTemplateEntry {
+    fn from(track: GridTrack) -> Self {
+        Self::Track(track)
+    }
+}
+
+/// How auto-placed items flow into a grid.
+///
+/// [MDN](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-auto-flow)
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default, JsonSchema, Serialize, Deserialize)]
+// Copy of taffy::style type of the same name, to derive JsonSchema.
+pub enum GridAutoFlow {
+    /// Items fill each row in turn, adding rows as needed
+    #[default]
+    Row,
+    /// Items fill each column in turn, adding columns as needed
+    Column,
+    /// As `Row`, filling earlier holes with later items
+    RowDense,
+    /// As `Column`, filling earlier holes with later items
+    ColumnDense,
+}
+
+impl From<GridAutoFlow> for taffy::style::GridAutoFlow {
+    fn from(value: GridAutoFlow) -> Self {
+        match value {
+            GridAutoFlow::Row => Self::Row,
+            GridAutoFlow::Column => Self::Column,
+            GridAutoFlow::RowDense => Self::RowDense,
+            GridAutoFlow::ColumnDense => Self::ColumnDense,
+        }
+    }
+}
+
 /// The CSS styling that can be applied to an element via the `Styled` trait
 #[derive(Clone, Refineable, Debug)]
 #[refineable(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -259,6 +395,10 @@ pub struct Style {
     pub align_content: Option<AlignContent>,
     /// How should contained within this item be aligned in the main/inline axis
     pub justify_content: Option<JustifyContent>,
+    /// How this grid's items are aligned in the inline axis of their grid areas
+    pub justify_items: Option<JustifyItems>,
+    /// How this grid item is aligned in the inline axis of its grid area. Falls back to the parent's [`JustifyItems`] if not set
+    pub justify_self: Option<JustifySelf>,
     /// How large should the gaps between items in a flex container be?
     #[refineable]
     pub gap: Size<DefiniteLength>,
@@ -320,6 +460,25 @@ pub struct Style {
     /// The row span of this element
     /// Equivalent to the Tailwind `grid-rows-<number>`
     pub grid_rows: Option<GridTemplate>,
+
+    /// The grid columns of this element as a track list, as CSS's `grid-template-columns`.
+    /// When it holds any entry it is used instead of `grid_cols`
+    pub grid_template_columns: Vec<GridTemplateEntry>,
+
+    /// The grid rows of this element as a track list, as CSS's `grid-template-rows`.
+    /// When it holds any entry it is used instead of `grid_rows`
+    pub grid_template_rows: Vec<GridTemplateEntry>,
+
+    /// The sizes of columns the grid makes for items placed outside its template, in turn,
+    /// as CSS's `grid-auto-columns`
+    pub grid_auto_columns: Vec<GridTrack>,
+
+    /// The sizes of rows the grid makes for items placed outside its template, in turn,
+    /// as CSS's `grid-auto-rows`
+    pub grid_auto_rows: Vec<GridTrack>,
+
+    /// How auto-placed items flow into this grid, as CSS's `grid-auto-flow`
+    pub grid_auto_flow: GridAutoFlow,
 
     /// The grid location of this element
     pub grid_location: Option<GridLocation>,
@@ -818,6 +977,8 @@ impl Default for Style {
             align_self: None,
             align_content: None,
             justify_content: None,
+            justify_items: None,
+            justify_self: None,
             // Flexbox
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::NoWrap,
@@ -837,6 +998,11 @@ impl Default for Style {
             transformation: None,
             grid_rows: None,
             grid_cols: None,
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_auto_columns: Vec::new(),
+            grid_auto_rows: Vec::new(),
+            grid_auto_flow: GridAutoFlow::Row,
             grid_location: None,
 
             #[cfg(debug_assertions)]

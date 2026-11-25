@@ -1,9 +1,10 @@
 use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
-    FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
-    SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
-    TextStyleRefinement, Transformation, UnderlineStyle, WhiteSpace, px, relative, rems,
+    FontWeight, GridAutoFlow, GridPlacement, GridTemplate, GridTemplateEntry, GridTemplateMinSize,
+    GridTrack, Hsla, JustifyContent, JustifyItems, JustifySelf, Length, SharedString,
+    StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement,
+    Transformation, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -830,6 +831,124 @@ pub trait Styled: Sized {
             repeat: rows,
             min_size: GridTemplateMinSize::MaxContent,
         });
+        self
+    }
+
+    /// Sets the grid columns of this element as a track list, as CSS's `grid-template-columns`.
+    /// It is used instead of [`Styled::grid_cols`] when it holds any entry.
+    fn grid_template_columns(
+        mut self,
+        entries: impl IntoIterator<Item = impl Into<GridTemplateEntry>>,
+    ) -> Self {
+        self.style().grid_template_columns = Some(entries.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Sets the grid rows of this element as a track list, as CSS's `grid-template-rows`.
+    /// It is used instead of [`Styled::grid_rows`] when it holds any entry.
+    fn grid_template_rows(
+        mut self,
+        entries: impl IntoIterator<Item = impl Into<GridTemplateEntry>>,
+    ) -> Self {
+        self.style().grid_template_rows = Some(entries.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Sets the sizes of the columns this grid makes for items placed outside its template,
+    /// as CSS's `grid-auto-columns`.
+    fn grid_auto_columns(mut self, tracks: impl IntoIterator<Item = GridTrack>) -> Self {
+        self.style().grid_auto_columns = Some(tracks.into_iter().collect());
+        self
+    }
+
+    /// Sets the sizes of the rows this grid makes for items placed outside its template,
+    /// as CSS's `grid-auto-rows`.
+    fn grid_auto_rows(mut self, tracks: impl IntoIterator<Item = GridTrack>) -> Self {
+        self.style().grid_auto_rows = Some(tracks.into_iter().collect());
+        self
+    }
+
+    /// Places auto-placed items by filling each row in turn.
+    /// [Docs](https://tailwindcss.com/docs/grid-auto-flow)
+    fn grid_flow_row(mut self) -> Self {
+        self.style().grid_auto_flow = Some(GridAutoFlow::Row);
+        self
+    }
+
+    /// Places auto-placed items by filling each column in turn.
+    /// [Docs](https://tailwindcss.com/docs/grid-auto-flow)
+    fn grid_flow_col(mut self) -> Self {
+        self.style().grid_auto_flow = Some(GridAutoFlow::Column);
+        self
+    }
+
+    /// Places auto-placed items by filling each row in turn, filling earlier holes with later items.
+    /// [Docs](https://tailwindcss.com/docs/grid-auto-flow)
+    fn grid_flow_row_dense(mut self) -> Self {
+        self.style().grid_auto_flow = Some(GridAutoFlow::RowDense);
+        self
+    }
+
+    /// Places auto-placed items by filling each column in turn, filling earlier holes with later items.
+    /// [Docs](https://tailwindcss.com/docs/grid-auto-flow)
+    fn grid_flow_col_dense(mut self) -> Self {
+        self.style().grid_auto_flow = Some(GridAutoFlow::ColumnDense);
+        self
+    }
+
+    /// Aligns this grid's items against the start of their grid areas' inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-items#start)
+    fn justify_items_start(mut self) -> Self {
+        self.style().justify_items = Some(JustifyItems::Start);
+        self
+    }
+
+    /// Aligns this grid's items against the end of their grid areas' inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-items#end)
+    fn justify_items_end(mut self) -> Self {
+        self.style().justify_items = Some(JustifyItems::End);
+        self
+    }
+
+    /// Aligns this grid's items along the center of their grid areas' inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-items#center)
+    fn justify_items_center(mut self) -> Self {
+        self.style().justify_items = Some(JustifyItems::Center);
+        self
+    }
+
+    /// Stretches this grid's items to fill their grid areas' inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-items#stretch)
+    fn justify_items_stretch(mut self) -> Self {
+        self.style().justify_items = Some(JustifyItems::Stretch);
+        self
+    }
+
+    /// Aligns this grid item against the start of its grid area's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#start)
+    fn justify_self_start(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Start);
+        self
+    }
+
+    /// Aligns this grid item against the end of its grid area's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#end)
+    fn justify_self_end(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::End);
+        self
+    }
+
+    /// Aligns this grid item along the center of its grid area's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#center)
+    fn justify_self_center(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Center);
+        self
+    }
+
+    /// Stretches this grid item to fill its grid area's inline axis.
+    /// [Docs](https://tailwindcss.com/docs/justify-self#stretch)
+    fn justify_self_stretch(mut self) -> Self {
+        self.style().justify_self = Some(JustifySelf::Stretch);
         self
     }
 

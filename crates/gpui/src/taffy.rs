@@ -1,6 +1,7 @@
 use crate::{
-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
-    Style, Window, size,
+    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridRepetition, GridTemplate,
+    GridTemplateEntry, GridTrack, GridTrackBreadth, Length, Pixels, Point, Size, Style, Window,
+    size,
     util::{
         ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
         round_to_device_pixel,
@@ -510,6 +511,69 @@ impl ToTaffy<taffy::style::Style> for Style {
             .unwrap_or_default()
         }
 
+        let to_track = |track: &GridTrack| -> taffy::TrackSizingFunction {
+            let min = match track.min {
+                GridTrackBreadth::Length(length) => taffy::MinTrackSizingFunction::from(ToTaffy::<
+                    taffy::style::LengthPercentage,
+                >::to_taffy(
+                    &length,
+                    rem_size,
+                    scale_factor,
+                )),
+                GridTrackBreadth::MinContent => taffy::MinTrackSizingFunction::min_content(),
+                GridTrackBreadth::MaxContent => taffy::MinTrackSizingFunction::max_content(),
+                // CSS allows neither a flex nor a fit-content minimum; both mean auto.
+                GridTrackBreadth::Auto
+                | GridTrackBreadth::Flex(_)
+                | GridTrackBreadth::FitContent(_) => taffy::MinTrackSizingFunction::auto(),
+            };
+            let max = match track.max {
+                GridTrackBreadth::Length(length) => taffy::MaxTrackSizingFunction::from(ToTaffy::<
+                    taffy::style::LengthPercentage,
+                >::to_taffy(
+                    &length,
+                    rem_size,
+                    scale_factor,
+                )),
+                GridTrackBreadth::Flex(flex) => taffy::MaxTrackSizingFunction::fr(flex),
+                GridTrackBreadth::Auto => taffy::MaxTrackSizingFunction::auto(),
+                GridTrackBreadth::MinContent => taffy::MaxTrackSizingFunction::min_content(),
+                GridTrackBreadth::MaxContent => taffy::MaxTrackSizingFunction::max_content(),
+                GridTrackBreadth::FitContent(limit) => taffy::style_helpers::fit_content(
+                    ToTaffy::<taffy::style::LengthPercentage>::to_taffy(
+                        &limit,
+                        rem_size,
+                        scale_factor,
+                    ),
+                ),
+            };
+            minmax(min, max)
+        };
+
+        let to_template = |entries: &[GridTemplateEntry],
+                           fallback: &Option<GridTemplate>|
+         -> Vec<taffy::GridTemplateComponent<_>> {
+            if entries.is_empty() {
+                return to_grid_repeat(fallback);
+            }
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    GridTemplateEntry::Track(track) => {
+                        taffy::GridTemplateComponent::Single(to_track(track))
+                    }
+                    GridTemplateEntry::Repeat(count, tracks) => repeat(
+                        match count {
+                            GridRepetition::Count(count) => taffy::RepetitionCount::Count(*count),
+                            GridRepetition::AutoFill => taffy::RepetitionCount::AutoFill,
+                            GridRepetition::AutoFit => taffy::RepetitionCount::AutoFit,
+                        },
+                        tracks.iter().map(to_track).collect(),
+                    ),
+                })
+                .collect()
+        };
+
         taffy::style::Style {
             display: self.display.into(),
             overflow: self.overflow.into(),
@@ -533,8 +597,13 @@ impl ToTaffy<taffy::style::Style> for Style {
             flex_basis: self.flex_basis.to_taffy(rem_size, scale_factor),
             flex_grow: self.flex_grow,
             flex_shrink: self.flex_shrink,
-            grid_template_rows: to_grid_repeat(&self.grid_rows),
-            grid_template_columns: to_grid_repeat(&self.grid_cols),
+            justify_items: self.justify_items.map(Into::into).unwrap_or_default(),
+            justify_self: self.justify_self.map(Into::into),
+            grid_template_rows: to_template(&self.grid_template_rows, &self.grid_rows),
+            grid_template_columns: to_template(&self.grid_template_columns, &self.grid_cols),
+            grid_auto_rows: self.grid_auto_rows.iter().map(to_track).collect(),
+            grid_auto_columns: self.grid_auto_columns.iter().map(to_track).collect(),
+            grid_auto_flow: self.grid_auto_flow.into(),
             grid_row: self
                 .grid_location
                 .as_ref()
@@ -801,6 +870,122 @@ mod tests {
         assert_eq!(
             taffy_border.left,
             taffy::style::LengthPercentage::length(2.0)
+        );
+    }
+
+    fn lay_out_grid(container: Style, children: Vec<Style>) -> Vec<(f32, f32, f32, f32)> {
+        let mut engine = TaffyLayoutEngine::new();
+        let children: Vec<LayoutId> = children
+            .into_iter()
+            .map(|style| engine.request_layout(style, Pixels(16.0), 1.0, &[]))
+            .collect();
+        let root = engine.request_layout(container, Pixels(16.0), 1.0, &children);
+        engine
+            .taffy
+            .compute_layout(
+                root.into(),
+                TaffySize {
+                    width: TaffyAvailableSpace::Definite(300.0),
+                    height: TaffyAvailableSpace::Definite(300.0),
+                },
+            )
+            .unwrap();
+        children
+            .iter()
+            .map(|child| {
+                let layout = engine.taffy.layout((*child).into()).unwrap();
+                (
+                    layout.location.x,
+                    layout.location.y,
+                    layout.size.width,
+                    layout.size.height,
+                )
+            })
+            .collect()
+    }
+
+    fn sized(width: f32, height: f32) -> Style {
+        let mut style = Style::default();
+        style.size = size(Pixels(width).into(), Pixels(height).into());
+        style
+    }
+
+    #[test]
+    fn grid_track_lists_auto_tracks_and_justify() {
+        use crate::{GridAutoFlow, JustifyItems, JustifySelf};
+
+        // grid-template-columns: 100px 1fr repeat(2, 20px); grid-auto-rows: 30px;
+        // justify-items: center, the last item justify-self: end.
+        let mut container = Style::default();
+        container.display = crate::Display::Grid;
+        container.size = size(Pixels(300.0).into(), Length::Auto);
+        container.grid_template_columns = vec![
+            GridTrack::length(Pixels(100.0)).into(),
+            GridTrack::flex(1.0).into(),
+            GridTemplateEntry::Repeat(
+                GridRepetition::Count(2),
+                vec![GridTrack::length(Pixels(20.0))],
+            ),
+        ];
+        container.grid_auto_rows = vec![GridTrack::length(Pixels(30.0))];
+        container.justify_items = Some(JustifyItems::Center);
+        let mut last = sized(10.0, 10.0);
+        last.justify_self = Some(JustifySelf::End);
+        let children = vec![
+            sized(10.0, 10.0),
+            sized(10.0, 10.0),
+            sized(10.0, 10.0),
+            sized(10.0, 10.0),
+            last,
+        ];
+
+        assert_eq!(
+            lay_out_grid(container.clone(), children.clone()),
+            vec![
+                (45.0, 0.0, 10.0, 10.0),
+                (175.0, 0.0, 10.0, 10.0),
+                (265.0, 0.0, 10.0, 10.0),
+                (285.0, 0.0, 10.0, 10.0),
+                // The fifth item makes an auto row 30px tall, and sits at its column's end.
+                (90.0, 30.0, 10.0, 10.0),
+            ]
+        );
+
+        // grid-auto-flow: column, with two 10px rows and 40px auto columns.
+        let mut by_column = Style::default();
+        by_column.display = crate::Display::Grid;
+        by_column.grid_template_rows = vec![GridTemplateEntry::Repeat(
+            GridRepetition::Count(2),
+            vec![GridTrack::length(Pixels(10.0))],
+        )];
+        by_column.grid_auto_columns = vec![GridTrack::length(Pixels(40.0))];
+        by_column.grid_auto_flow = GridAutoFlow::Column;
+        assert_eq!(
+            lay_out_grid(
+                by_column,
+                vec![sized(40.0, 10.0), sized(40.0, 10.0), sized(40.0, 10.0)]
+            ),
+            vec![
+                (0.0, 0.0, 40.0, 10.0),
+                (0.0, 10.0, 40.0, 10.0),
+                (40.0, 0.0, 40.0, 10.0),
+            ]
+        );
+
+        // An empty track list leaves grid_cols as it was.
+        let mut repeat_only = Style::default();
+        repeat_only.display = crate::Display::Grid;
+        repeat_only.size = size(Pixels(300.0).into(), Length::Auto);
+        repeat_only.grid_cols = Some(GridTemplate {
+            repeat: 3,
+            min_size: crate::GridTemplateMinSize::Zero,
+        });
+        assert_eq!(
+            lay_out_grid(repeat_only, vec![Style::default(), Style::default()])
+                .iter()
+                .map(|(x, _, width, _)| (*x, *width))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 100.0), (100.0, 100.0)]
         );
     }
 }
