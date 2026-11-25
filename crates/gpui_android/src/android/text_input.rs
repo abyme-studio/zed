@@ -15,10 +15,8 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
 use crate::android::CallbackSlot;
-use gpui::{
-    Autocapitalize, PlatformInputHandler, TextInputAction, TextInputConfiguration, TextInputMode,
-    TextInputStateChange,
-};
+use crate::editor::{InputType, editor_of};
+use gpui::{PlatformInputHandler, TextInputConfiguration, TextInputStateChange};
 
 /// How much of the document, in UTF-16 units, the IME sees around the caret.
 const WINDOW: usize = 4096;
@@ -36,58 +34,6 @@ pub struct TextInputState {
     pub text: String,
     pub selection: TextSpan,
     pub compose_region: Option<TextSpan>,
-}
-
-/// `EditorInfo.inputType`'s bits, as Android's `InputType` names them.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct InputType(u32);
-
-impl InputType {
-    const TYPE_CLASS_TEXT: Self = Self(0x1);
-    const TYPE_CLASS_NUMBER: Self = Self(0x2);
-    const TYPE_CLASS_PHONE: Self = Self(0x3);
-    const TYPE_NUMBER_FLAG_DECIMAL: Self = Self(0x2000);
-    const TYPE_TEXT_VARIATION_EMAIL_ADDRESS: Self = Self(0x20);
-    const TYPE_TEXT_VARIATION_URI: Self = Self(0x10);
-    const TYPE_TEXT_FLAG_CAP_CHARACTERS: Self = Self(0x1000);
-    const TYPE_TEXT_FLAG_CAP_WORDS: Self = Self(0x2000);
-    const TYPE_TEXT_FLAG_CAP_SENTENCES: Self = Self(0x4000);
-    const TYPE_TEXT_FLAG_AUTO_CORRECT: Self = Self(0x8000);
-    const TYPE_TEXT_FLAG_MULTI_LINE: Self = Self(0x20000);
-    const TYPE_TEXT_FLAG_NO_SUGGESTIONS: Self = Self(0x80000);
-
-    fn empty() -> Self {
-        Self(0)
-    }
-
-    fn bits(self) -> u32 {
-        self.0
-    }
-}
-
-impl std::ops::BitOr for InputType {
-    type Output = Self;
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-
-impl std::ops::BitOrAssign for InputType {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0 |= other.0;
-    }
-}
-
-/// `EditorInfo.IME_ACTION_*`.
-mod ime {
-    pub const UNSPECIFIED: u32 = 0;
-    pub const NONE: u32 = 1;
-    pub const GO: u32 = 2;
-    pub const SEARCH: u32 = 3;
-    pub const SEND: u32 = 4;
-    pub const NEXT: u32 = 5;
-    pub const DONE: u32 = 6;
-    pub const PREVIOUS: u32 = 7;
 }
 
 /// One edit of the IME's to the text the view holds (`others::edit`), number `seq`.
@@ -185,44 +131,7 @@ impl TextInput {
         if *self.configuration.borrow() == configuration {
             return;
         }
-        // The text flags are bits that mean other things on the number and phone classes.
-        let (mut input_type, text) = match configuration.input_mode {
-            TextInputMode::Decimal => (InputType::TYPE_CLASS_NUMBER | InputType::TYPE_NUMBER_FLAG_DECIMAL, false),
-            TextInputMode::Numeric => (InputType::TYPE_CLASS_NUMBER, false),
-            TextInputMode::Tel => (InputType::TYPE_CLASS_PHONE, false),
-            TextInputMode::Email => (InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_EMAIL_ADDRESS, true),
-            TextInputMode::Url => (InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_VARIATION_URI, true),
-            TextInputMode::Text | TextInputMode::Search | TextInputMode::None => (InputType::TYPE_CLASS_TEXT, true),
-        };
-        if text {
-            input_type |= match configuration.autocapitalize {
-                Autocapitalize::None => InputType::empty(),
-                Autocapitalize::Words => InputType::TYPE_TEXT_FLAG_CAP_WORDS,
-                Autocapitalize::Sentences => InputType::TYPE_TEXT_FLAG_CAP_SENTENCES,
-                Autocapitalize::Characters => InputType::TYPE_TEXT_FLAG_CAP_CHARACTERS,
-            };
-            if configuration.autocorrect {
-                input_type |= InputType::TYPE_TEXT_FLAG_AUTO_CORRECT;
-            }
-            if !configuration.suggestions {
-                input_type |= InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-            }
-        }
-        let action = match configuration.input_action {
-            TextInputAction::Unspecified => ime::UNSPECIFIED,
-            TextInputAction::Enter => {
-                if text {
-                    input_type |= InputType::TYPE_TEXT_FLAG_MULTI_LINE;
-                }
-                ime::NONE
-            }
-            TextInputAction::Done => ime::DONE,
-            TextInputAction::Go => ime::GO,
-            TextInputAction::Next => ime::NEXT,
-            TextInputAction::Previous => ime::PREVIOUS,
-            TextInputAction::Search => ime::SEARCH,
-            TextInputAction::Send => ime::SEND,
-        };
+        let (input_type, action) = editor_of(&configuration);
         keyboard.editor(input_type, action, &configuration.autocomplete);
         self.configuration.replace(configuration);
     }
