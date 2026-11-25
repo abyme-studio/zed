@@ -9,7 +9,7 @@ use crate::{
 use collections::{FxHashMap, FxHashSet};
 use std::{fmt::Debug, ops::Range};
 use taffy::{
-    TaffyTree, TraversePartialTree as _,
+    ResolveOrZero as _, TaffyTree, TraversePartialTree as _,
     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
     prelude::{max_content, min_content},
     style::AvailableSpace as TaffyAvailableSpace,
@@ -21,8 +21,13 @@ type StackSafe<T> = stacksafe::StackSafe<T>;
 #[cfg(not(feature = "stacker"))]
 type StackSafe<T> = T;
 
-type MeasureFn =
-    dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>;
+/// A measured node's size, and the distance from its top to its first baseline, if it has one.
+type MeasureFn = dyn FnMut(
+    Size<Option<Pixels>>,
+    Size<AvailableSpace>,
+    &mut Window,
+    &mut App,
+) -> (Size<Pixels>, Option<Pixels>);
 type NodeMeasureFn = StackSafe<Box<MeasureFn>>;
 
 struct NodeContext {
@@ -92,7 +97,7 @@ impl TaffyLayoutEngine {
             Size<AvailableSpace>,
             &mut Window,
             &mut App,
-        ) -> Size<Pixels>
+        ) -> (Size<Pixels>, Option<Pixels>)
         + 'static,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
@@ -237,7 +242,8 @@ impl TaffyLayoutEngine {
                 id.into(),
                 available_space.into(),
                 |input, _id, node_context, style| {
-                    taffy::compute_leaf_layout(
+                    let mut first_baseline = None;
+                    let mut output = taffy::compute_leaf_layout(
                         input,
                         style,
                         |_, _| 0.0,
@@ -264,15 +270,28 @@ impl TaffyLayoutEngine {
                                 untransform(available_space.height),
                             );
 
-                            let measured_size: Size<Pixels> = (node_context.measure)(
+                            let (measured_size, baseline) = (node_context.measure)(
                                 known_dimensions,
                                 available_space,
                                 window,
                                 cx,
                             );
+                            first_baseline = baseline.map(|baseline| baseline.0 * scale_factor);
                             snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
                         },
-                    )
+                    );
+                    // The measure function answers from the top of the content box; taffy
+                    // aligns baselines from the top of the border box.
+                    if let Some(first_baseline) = first_baseline
+                        && output.baselines.first.is_none()
+                    {
+                        let resolve = |_: *const (), _: f32| 0.0;
+                        let parent_width = input.parent_size.width;
+                        let padding = style.padding.resolve_or_zero(parent_width, resolve);
+                        let border = style.border.resolve_or_zero(parent_width, resolve);
+                        output.baselines.first = Some(first_baseline + padding.top + border.top);
+                    }
+                    output
                 },
             )
             .expect(EXPECT_MESSAGE);

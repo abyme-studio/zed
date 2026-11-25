@@ -5838,6 +5838,29 @@ impl Window {
         F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
             + 'static,
     {
+        self.request_measured_layout_with_baseline(
+            style,
+            move |known_dimensions, available_space, window, cx| {
+                (measure(known_dimensions, available_space, window, cx), None)
+            },
+        )
+    }
+
+    /// Like [`Self::request_measured_layout`], but the closure also returns the distance from
+    /// the top of the measured content to its first baseline, if it has one. Layout uses it to
+    /// align the node with `align-items: baseline`; a node without one aligns by its bottom edge.
+    ///
+    /// This method should only be called as part of the request_layout or prepaint phase of element drawing.
+    pub fn request_measured_layout_with_baseline<F>(&mut self, style: Style, measure: F) -> LayoutId
+    where
+        F: Fn(
+                Size<Option<Pixels>>,
+                Size<AvailableSpace>,
+                &mut Window,
+                &mut App,
+            ) -> (Size<Pixels>, Option<Pixels>)
+            + 'static,
+    {
         self.invalidator.debug_assert_prepaint();
 
         let rem_size = self.rem_size();

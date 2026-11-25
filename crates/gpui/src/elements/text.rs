@@ -750,7 +750,7 @@ impl TextLayout {
             vec![text_style.to_run(text.len())]
         };
         let inline_objects = inline_objects.unwrap_or_default();
-        window.request_measured_layout(Default::default(), {
+        window.request_measured_layout_with_baseline(Default::default(), {
             let element_state = self.clone();
 
             move |known_dimensions, available_space, window, cx| {
@@ -796,7 +796,7 @@ impl TextLayout {
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {
-                    return size;
+                    return (size, first_baseline(&text_layout.lines, line_height));
                 }
 
                 let (shaped_text, runs, surviving_objects, surviving_indices) =
@@ -905,7 +905,7 @@ impl TextLayout {
                         bounds: None,
                         inline_object_slots: Default::default(),
                     });
-                    return Size::default();
+                    return (Size::default(), None);
                 };
 
                 let mut inline_object_slots = SmallVec::new();
@@ -932,6 +932,7 @@ impl TextLayout {
                     size.height += line_size.height;
                     size.width = size.width.max(line_size.width).ceil();
                 }
+                let baseline = first_baseline(&lines, line_height);
 
                 element_state.0.borrow_mut().replace(TextLayoutInner {
                     lines,
@@ -945,7 +946,7 @@ impl TextLayout {
                     inline_object_slots,
                 });
 
-                size
+                (size, baseline)
             }
         })
     }
@@ -1503,6 +1504,13 @@ impl Element for InteractiveText {
     }
 }
 
+/// The first line's baseline, from the top of the text, where its glyphs are painted.
+fn first_baseline(lines: &[WrappedLine], line_height: Pixels) -> Option<Pixels> {
+    let layout = &lines.first()?.unwrapped_layout;
+    let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
+    Some(padding_top + layout.ascent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1678,6 +1686,73 @@ mod tests {
         assert_eq!(
             painted.as_slice(),
             &[(0, first_placement), (1, second_placement)]
+        );
+    }
+
+    struct BaselineRow;
+
+    impl crate::Render for BaselineRow {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut crate::Context<Self>,
+        ) -> impl IntoElement {
+            use crate::{InteractiveElement as _, ParentElement as _, Styled as _, div, px};
+            div()
+                .flex()
+                .items_baseline()
+                .child(
+                    div()
+                        .debug_selector(|| "SMALL".into())
+                        .text_size(px(10.))
+                        .line_height(px(30.))
+                        .child("small"),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "LARGE".into())
+                        .text_size(px(20.))
+                        .line_height(px(24.))
+                        .child("large"),
+                )
+        }
+    }
+
+    #[crate::test]
+    fn text_gives_its_baseline_to_baseline_alignment(cx: &mut crate::TestAppContext) {
+        use crate::{font, px, size};
+
+        let window = cx.open_window(size(px(400.), px(200.)), |_, _| BaselineRow);
+        cx.run_until_parked();
+
+        let (small, large, small_baseline, large_baseline) = window
+            .update(cx, |_, window, _| {
+                let bounds = |selector| {
+                    window
+                        .rendered_frame
+                        .debug_bounds
+                        .get(selector)
+                        .copied()
+                        .expect("debug bounds")
+                };
+                let text_system = window.text_system();
+                let font_id = text_system.resolve_font(&font(".SystemUIFont"));
+                (
+                    bounds("SMALL"),
+                    bounds("LARGE"),
+                    text_system.baseline_offset(font_id, px(10.), px(30.)),
+                    text_system.baseline_offset(font_id, px(20.), px(24.)),
+                )
+            })
+            .unwrap();
+
+        // Aligned by bottom edges, as without baselines, the tops would be 0 and 6.
+        assert_ne!(large.origin.y - small.origin.y, px(6.));
+        assert!(
+            ((small.origin.y + small_baseline) - (large.origin.y + large_baseline)).abs() < px(1.),
+            "baselines differ: small at {:?}, large at {:?}",
+            small.origin.y + small_baseline,
+            large.origin.y + large_baseline,
         );
     }
 }
