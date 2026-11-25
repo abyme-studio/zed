@@ -966,6 +966,7 @@ impl CosmicTextSystemState {
                 ),
                 index: glyph.start,
                 is_emoji,
+                is_replaced: false,
             };
 
             if let Some(last_run) = runs
