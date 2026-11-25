@@ -148,6 +148,13 @@ pub trait Styled: Sized {
         self.overflow_hidden()
     }
 
+    /// Sets the space added after each character of the text, as CSS `letter-spacing`.
+    /// [Docs](https://tailwindcss.com/docs/letter-spacing)
+    fn letter_spacing(mut self, spacing: impl Into<crate::Pixels>) -> Self {
+        self.text_style().letter_spacing = Some(spacing.into());
+        self
+    }
+
     /// Sets the flex direction of the element to `column`.
     /// [Docs](https://tailwindcss.com/docs/flex-direction#column)
     fn flex_col(mut self) -> Self {

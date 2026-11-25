@@ -1025,6 +1025,8 @@ impl LineLayoutCache {
                 )
             };
 
+            apply_letter_spacing_to_layout(&mut layout, runs);
+
             if let Some(force_width) = force_width {
                 apply_force_width_to_layout(&mut layout, force_width);
             }
@@ -1060,6 +1062,47 @@ impl LineLayoutCache {
             .store(font_generation, Ordering::Release);
         font_generation
     }
+}
+
+// Letter spacing adds its space after each character, as CSS `letter-spacing` does,
+// trailing space included. Glyphs that share a text index (a ligature's parts,
+// a cluster's marks) are one character and move together. The platform shapers
+// never see the spacing, so every text system gets it the same way.
+fn apply_letter_spacing_to_layout(layout: &mut LineLayout, runs: &[FontRun]) {
+    if runs.iter().all(|run| run.letter_spacing.is_none()) {
+        return;
+    }
+
+    let mut run_ends = Vec::with_capacity(runs.len());
+    let mut end = 0;
+    for run in runs {
+        end += run.len;
+        run_ends.push((end, run.letter_spacing.unwrap_or_default()));
+    }
+    let spacing_at = |index: usize| {
+        run_ends
+            .iter()
+            .find(|(end, _)| index < *end)
+            .map_or(px(0.), |(_, spacing)| *spacing)
+    };
+
+    let mut offset = px(0.);
+    let mut previous: Option<usize> = None;
+    for run in layout.runs.iter_mut() {
+        for glyph in run.glyphs.iter_mut() {
+            if let Some(previous) = previous
+                && previous != glyph.index
+            {
+                offset += spacing_at(previous);
+            }
+            glyph.position.x += offset;
+            previous = Some(glyph.index);
+        }
+    }
+    if let Some(previous) = previous {
+        offset += spacing_at(previous);
+    }
+    layout.width += offset;
 }
 
 // Combining marks (e.g. Thai vowel signs, Arabic diacritics) are shaped by
@@ -1098,6 +1141,8 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
 pub struct FontRun {
     pub len: usize,
     pub font_id: FontId,
+    /// Extra space added after each character of the run, applied after shaping.
+    pub letter_spacing: Option<Pixels>,
 }
 
 trait AsCacheKeyRef {
@@ -1253,6 +1298,7 @@ fn shape_line_replacing_inline_objects(
             shaping_runs.push(FontRun {
                 len: shaping_end - shaping_start,
                 font_id: run.font_id,
+                letter_spacing: run.letter_spacing,
             });
         }
         orig_offset = orig_end;
@@ -1803,5 +1849,77 @@ mod tests {
                 baseline_y: px(49.),
             }),
         );
+    }
+
+    #[test]
+    fn letter_spacing_follows_each_character_and_moves_a_cluster_together() {
+        // "ab" then "é" as two glyphs sharing index 2, the second run spaced wider.
+        let mut layout = make_layout(vec![
+            glyph_at(0., 0),
+            glyph_at(10., 1),
+            glyph_at(20., 2),
+            glyph_at(20., 2),
+        ]);
+        layout.width = px(30.);
+        let runs = [
+            FontRun {
+                len: 2,
+                font_id: FontId(0),
+                letter_spacing: Some(px(2.)),
+            },
+            FontRun {
+                len: 3,
+                font_id: FontId(0),
+                letter_spacing: Some(px(5.)),
+            },
+        ];
+
+        apply_letter_spacing_to_layout(&mut layout, &runs);
+
+        assert_eq!(glyph_x_positions(&layout), vec![0., 12., 24., 24.]);
+        // 2 + 2 after "a" and "b", 5 after the cluster.
+        assert_eq!(layout.width, px(39.));
+    }
+
+    #[test]
+    fn letter_spacing_none_leaves_the_layout_as_shaped() {
+        let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(10., 1)]);
+        layout.width = px(20.);
+        let runs = [FontRun {
+            len: 2,
+            font_id: FontId(0),
+            letter_spacing: None,
+        }];
+
+        apply_letter_spacing_to_layout(&mut layout, &runs);
+
+        assert_eq!(glyph_x_positions(&layout), vec![0., 10.]);
+        assert_eq!(layout.width, px(20.));
+    }
+
+    #[test]
+    fn letter_spacing_widens_a_shaped_line_and_keys_the_cache() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let text = SharedString::from("abcd");
+        let run = TextRun {
+            len: text.len(),
+            font: font(".ZedMono"),
+            ..Default::default()
+        };
+        let spaced = TextRun {
+            letter_spacing: Some(px(3.)),
+            ..run.clone()
+        };
+
+        let plain = text_system.shape_line(text.clone(), px(14.), &[run], None);
+        let wide = text_system.shape_line(text.clone(), px(14.), &[spaced], None);
+
+        assert_eq!(wide.width, plain.width + px(12.));
+        let plain_x: Vec<_> = plain.runs[0].glyphs.iter().map(|g| g.position.x).collect();
+        let wide_x: Vec<_> = wide.runs[0].glyphs.iter().map(|g| g.position.x).collect();
+        for (ix, (plain_x, wide_x)) in plain_x.iter().zip(&wide_x).enumerate() {
+            assert_eq!(*wide_x, *plain_x + px(3.) * ix as f32);
+        }
     }
 }

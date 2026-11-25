@@ -443,6 +443,7 @@ impl DirectWriteState {
                     segment_runs.push(FontRun {
                         len,
                         font_id: run.font_id,
+                        letter_spacing: None,
                     });
                 }
                 remaining_bytes -= len;

@@ -406,6 +406,7 @@ impl PlatformTextSystem for WebTextSystem {
                         .map(|run| FontRun {
                             len: run.len,
                             font_id: self.native_font_id(run.font_id),
+                            letter_spacing: run.letter_spacing,
                         })
                         .collect(),
                 )

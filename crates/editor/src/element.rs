@@ -7564,6 +7564,7 @@ impl LineWithInvisibles {
                             background_color: text_style.background_color,
                             underline: text_style.underline,
                             strikethrough: text_style.strikethrough,
+                            letter_spacing: None,
                         };
 
                         let line_layout = window
@@ -7653,6 +7654,7 @@ impl LineWithInvisibles {
                             background_color: text_style.background_color,
                             underline: text_style.underline,
                             strikethrough: text_style.strikethrough,
+                            letter_spacing: None,
                         });
 
                         if let Some(severity) = highlighted_chunk.diagnostic_underline_severity {
@@ -7757,6 +7759,7 @@ impl LineWithInvisibles {
                         background_color: text_run.background_color,
                         underline: text_run.underline,
                         strikethrough: text_run.strikethrough,
+                        letter_spacing: None,
                     });
                     cursor_col = segment_start_col;
                 }
@@ -7771,6 +7774,7 @@ impl LineWithInvisibles {
                         background_color: text_run.background_color,
                         underline: text_run.underline,
                         strikethrough: text_run.strikethrough,
+                        letter_spacing: None,
                     });
                     cursor_col = segment_slice_end_col;
                 }
@@ -7787,6 +7791,7 @@ impl LineWithInvisibles {
                     background_color: text_run.background_color,
                     underline: text_run.underline,
                     strikethrough: text_run.strikethrough,
+                    letter_spacing: None,
                 });
             }
             line_col = run_end_col;
