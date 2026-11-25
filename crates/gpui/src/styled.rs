@@ -4,7 +4,7 @@ use crate::{
     FontWeight, GridAutoFlow, GridPlacement, GridTemplate, GridTemplateEntry, GridTemplateMinSize,
     GridTrack, Hsla, JustifyContent, JustifyItems, JustifySelf, Length, SharedString,
     StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement,
-    Transformation, UnderlineStyle, WhiteSpace, WordBreak, px, relative, rems,
+    TextWrapStyle, Transformation, UnderlineStyle, WhiteSpace, WordBreak, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -89,6 +89,13 @@ pub trait Styled: Sized {
     /// [Docs](https://tailwindcss.com/docs/word-break#break-all)
     fn break_all(mut self) -> Self {
         self.text_style().word_break = Some(WordBreak::BreakAll);
+        self
+    }
+
+    /// Balances the lines of wrapped text, as CSS `text-wrap: balance`.
+    /// [Docs](https://tailwindcss.com/docs/text-wrap#balancing-headings)
+    fn text_balance(mut self) -> Self {
+        self.text_style().text_wrap_style = Some(TextWrapStyle::Balance);
         self
     }
 

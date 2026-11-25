@@ -1,4 +1,4 @@
-use crate::{FontId, Pixels, SharedString, TextRun, TextSystem, WordBreak, px};
+use crate::{FontId, Pixels, SharedString, TextRun, TextSystem, TextWrapStyle, WordBreak, px};
 use collections::HashMap;
 use std::{borrow::Cow, iter, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
@@ -33,6 +33,8 @@ pub enum IndentAdjustment {
 pub struct WrapOptions {
     /// Where a line may break.
     pub word_break: WordBreak,
+    /// How the paragraph chooses its breaks.
+    pub text_wrap_style: TextWrapStyle,
 }
 
 /// The GPUI line wrapper, used to wrap lines of text to a given width.

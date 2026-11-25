@@ -583,6 +583,23 @@ pub enum WordBreak {
     BreakAll,
 }
 
+/// How a wrapped paragraph chooses its breaks, as CSS `text-wrap-style`
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum TextWrapStyle {
+    /// Fill each line before breaking
+    #[default]
+    Auto,
+    /// Keep the same number of lines, but narrow the wrap width until they are as even as
+    /// they can be, as CSS `text-wrap: balance`. For headings and short paragraphs: a
+    /// paragraph of more than [`TextWrapStyle::BALANCE_MAX_LINES`] lines wraps as `Auto`
+    Balance,
+}
+
+impl TextWrapStyle {
+    /// The most lines a balanced paragraph has; a longer one wraps as `Auto`, as Chrome does.
+    pub const BALANCE_MAX_LINES: usize = 6;
+}
+
 /// How to truncate text that overflows the width of the element
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TextOverflow {
@@ -668,6 +685,9 @@ pub struct TextStyle {
 
     /// Where a wrapped line may break
     pub word_break: WordBreak,
+
+    /// How a wrapped paragraph chooses its breaks
+    pub text_wrap_style: TextWrapStyle,
 }
 
 impl Default for TextStyle {
@@ -691,6 +711,7 @@ impl Default for TextStyle {
             line_clamp: None,
             letter_spacing: None,
             word_break: WordBreak::Normal,
+            text_wrap_style: TextWrapStyle::Auto,
         }
     }
 }
@@ -768,6 +789,7 @@ impl TextStyle {
     pub fn wrap_options(&self) -> WrapOptions {
         WrapOptions {
             word_break: self.word_break,
+            text_wrap_style: self.text_wrap_style,
         }
     }
 }

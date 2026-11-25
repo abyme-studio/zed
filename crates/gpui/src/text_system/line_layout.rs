@@ -1,6 +1,6 @@
 use crate::{
     Bounds, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, TextAlign,
-    WordBreak, point, px, size,
+    TextWrapStyle, WordBreak, point, px, size,
 };
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
@@ -252,6 +252,57 @@ impl LineLayout {
             WordBreak::Normal,
             scratch,
         )
+    }
+
+    /// The wrap boundaries for `wrap_width` and `wrap_options`. A balanced paragraph keeps the
+    /// line count it has at `wrap_width`, at the narrowest width that still gives it. The
+    /// layout's width stays `wrap_width`, so the text's box and its alignment are unchanged.
+    fn wrap(
+        &self,
+        text: &str,
+        wrap_width: Pixels,
+        max_lines: Option<usize>,
+        inline_objects: &[InlineObject],
+        wrap_options: WrapOptions,
+        scratch: &mut WrapScratch,
+    ) -> SmallVec<[WrapBoundary; 1]> {
+        let mut wrap_at = |width| {
+            self.compute_wrap_boundaries_with_inline_objects(
+                text,
+                width,
+                max_lines,
+                inline_objects,
+                wrap_options.word_break,
+                scratch,
+            )
+        };
+        let boundaries = wrap_at(wrap_width);
+        let lines = boundaries.len() + 1;
+        // A clamped paragraph is not balanced: its hidden lines would move the visible breaks.
+        if wrap_options.text_wrap_style != TextWrapStyle::Balance
+            || lines < 2
+            || lines > TextWrapStyle::BALANCE_MAX_LINES
+            || max_lines.is_some()
+        {
+            return boundaries;
+        }
+
+        // No width under the text's width over its line count keeps the count, so the search
+        // starts there. Fewer lines never come from a narrower width.
+        let mut narrowest = boundaries;
+        let mut fits = wrap_width;
+        let mut too_narrow = (self.width / lines as f32).min(wrap_width);
+        while fits - too_narrow > px(0.5) {
+            let width = (fits + too_narrow) / 2.;
+            let boundaries = wrap_at(width);
+            if boundaries.len() + 1 == lines {
+                fits = width;
+                narrowest = boundaries;
+            } else {
+                too_narrow = width;
+            }
+        }
+        narrowest
     }
 
     fn compute_wrap_boundaries_with_inline_objects(
@@ -924,12 +975,12 @@ impl LineLayoutCache {
                 )
             };
             let wrap_boundaries = match wrap_width {
-                Some(wrap_width) => unwrapped_layout.compute_wrap_boundaries_with_inline_objects(
+                Some(wrap_width) => unwrapped_layout.wrap(
                     text.as_ref(),
                     wrap_width,
                     max_lines,
                     inline_objects,
-                    wrap_options.word_break,
+                    wrap_options,
                     &mut self.wrap_scratch.borrow_mut(),
                 ),
                 None => SmallVec::new(),
@@ -2016,7 +2067,10 @@ mod tests {
                     Some(em * 5.),
                     None,
                     &[],
-                    WrapOptions { word_break },
+                    WrapOptions {
+                        word_break,
+                        ..Default::default()
+                    },
                 )
                 .unwrap()
         };
@@ -2024,5 +2078,57 @@ mod tests {
         assert_eq!(wrap_indices(&shape(WordBreak::Normal)[0].layout), vec![3, 8]);
         assert_eq!(wrap_indices(&shape(WordBreak::BreakAll)[0].layout), vec![5]);
         assert_eq!(wrap_indices(&shape(WordBreak::Normal)[0].layout), vec![3, 8]);
+    }
+
+    #[test]
+    fn balance_evens_the_lines_and_keeps_the_box() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let em_run = TextRun {
+            len: 1,
+            font: font(".ZedMono"),
+            ..Default::default()
+        };
+        let em = text_system
+            .shape_line("m".into(), px(10.), std::slice::from_ref(&em_run), None)
+            .width;
+        let shape = |text: &'static str, text_wrap_style, line_clamp| {
+            let runs = [TextRun {
+                len: text.len(),
+                ..em_run.clone()
+            }];
+            text_system
+                .shape_text_with_options(
+                    text.into(),
+                    px(10.),
+                    &runs,
+                    Some(em * 12.5),
+                    line_clamp,
+                    &[],
+                    WrapOptions {
+                        text_wrap_style,
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .remove(0)
+                .layout
+        };
+
+        let text = "aa bb cc dd ee";
+        let auto = shape(text, TextWrapStyle::Auto, None);
+        let balanced = shape(text, TextWrapStyle::Balance, None);
+        // Auto fills the first line and leaves "ee" alone; balance moves "cc" down.
+        assert_eq!(wrap_indices(&auto), vec![12]);
+        assert_eq!(wrap_indices(&balanced), vec![6]);
+        assert_eq!(balanced.width(), auto.width());
+
+        // One line, or a clamped paragraph, wraps as auto. The clamp is not in the cache's key,
+        // so the clamped paragraph is new text.
+        assert!(wrap_indices(&shape("aa bb", TextWrapStyle::Balance, None)).is_empty());
+        assert_eq!(
+            wrap_indices(&shape("ab cd ef gh ij", TextWrapStyle::Balance, Some(2))),
+            vec![12]
+        );
     }
 }
