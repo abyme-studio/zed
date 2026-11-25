@@ -8,7 +8,8 @@ use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
-    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
+    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Transformation,
+    Window, black, phi,
     point, px, quad, rems, size,
 };
 use collections::HashSet;
@@ -300,6 +301,10 @@ pub struct Style {
 
     /// The opacity of this element
     pub opacity: Option<f32>,
+
+    /// How this element and its children are scaled, rotated and moved where they are painted
+    /// and hit tested, about the element's center, as CSS's `transform`. Layout is unchanged.
+    pub transformation: Option<Transformation>,
 
     /// The grid columns of this element
     /// Roughly equivalent to the Tailwind `grid-cols-<number>`
@@ -820,6 +825,7 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            transformation: None,
             grid_rows: None,
             grid_cols: None,
             grid_location: None,

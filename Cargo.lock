@@ -7657,12 +7657,14 @@ dependencies = [
  "criterion",
  "gpui",
  "gpui_android",
+ "gpui_apple",
  "gpui_ios",
  "gpui_linux",
  "gpui_macos",
  "gpui_web",
  "gpui_wgpu",
  "gpui_windows",
+ "image",
 ]
 
 [[package]]

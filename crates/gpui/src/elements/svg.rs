@@ -1,3 +1,5 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::{
     f32::consts::TAU,
     fs,
@@ -239,9 +241,11 @@ impl InteractiveElement for Svg {
     }
 }
 
-/// A transformation to apply to an SVG element.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A transformation to apply to an SVG element, or to any element and its children with
+/// [`Styled::transform`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Transformation {
+    #[schemars(with = "[f32; 2]")]
     scale: Size<f32>,
     translate: Point<Pixels>,
     rotate: Radians,

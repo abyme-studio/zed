@@ -317,6 +317,7 @@ fn insert_primitives(scene: &mut Scene, rectangles: &[Rectangle]) {
                 border_color: Default::default(),
                 corner_radii: Default::default(),
                 border_widths: Default::default(),
+                pad: [0; 2],
             }),
             Kind::Shadow => scene.insert_primitive(gpui::Shadow {
                 order: 0,

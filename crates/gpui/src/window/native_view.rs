@@ -221,8 +221,10 @@ impl Element for NativeViewElement {
             return;
         };
         let id = self.0.0.id;
-        let bounds = window.snap_bounds(hitbox.bounds);
-        let content_mask = window.snapped_content_mask();
+        // A platform view sits in the window unrotated, at its transformed bounding box.
+        let (bounds, content_mask, _) = window
+            .snapped_content_mask()
+            .untransformed(window.snap_bounds(hitbox.bounds));
         window.next_frame.scene.insert_primitive(PaintNativeView {
             order: 0,
             id,

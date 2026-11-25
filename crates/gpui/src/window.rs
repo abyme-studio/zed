@@ -1183,7 +1183,15 @@ impl Frame {
         let mut hit_test = HitTest::default();
         for hitbox in self.hitboxes.iter().rev() {
             let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
-            if bounds.contains(&position) {
+            // A hitbox inserted inside `Window::with_transformation` is in the coordinates the
+            // transformation maps to the window's, so the position is mapped back to them.
+            let transform = &hitbox.content_mask.transform;
+            let local_position = if *transform == TransformationMatrix::unit() {
+                Some(position)
+            } else {
+                transform.inverse().map(|inverse| inverse.apply(position))
+            };
+            if local_position.is_some_and(|position| bounds.contains(&position)) {
                 hit_test.ids.push(hitbox.id);
                 if !set_hover_hitbox_count
                     && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll
@@ -2565,6 +2573,10 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub fade_from: Point<P>,
     /// Where a linear fade has gone; none when it is `fade_from`.
     pub fade_to: Point<P>,
+    /// Maps the coordinates of this mask, and of what is drawn under it, to the window's, its
+    /// translation in `P`. The unit transformation, unless drawn inside
+    /// [`Window::with_transformation`].
+    pub transform: TransformationMatrix,
 }
 
 impl ContentMask<Pixels> {
@@ -2608,12 +2620,14 @@ impl ContentMask<Pixels> {
             corner_radii: self.corner_radii.scale(factor),
             fade_from: self.fade_from.scale(factor),
             fade_to: self.fade_to.scale(factor),
+            transform: self.transform.scale_translation(factor),
         }
     }
 
     /// Intersect the content mask with the given content mask. The bounds intersect; the rounded
     /// rectangle is this mask's when it rounds, else the other's (one rounded rectangle is kept,
-    /// the innermost when this is the newer mask). The fade is kept the same way.
+    /// the innermost when this is the newer mask). The fade is kept the same way. Both are taken
+    /// to be in the other's coordinates, whose transformation the result keeps.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
         let round = if self.is_rounded() { self } else { other };
@@ -2624,7 +2638,37 @@ impl ContentMask<Pixels> {
             corner_radii: round.corner_radii,
             fade_from: fade.fade_from,
             fade_to: fade.fade_to,
+            transform: other.transform,
         }
+    }
+}
+
+impl ContentMask<ScaledPixels> {
+    /// `bounds` and this mask carried into the window's coordinates, with no transformation, and
+    /// the factor lengths were scaled by on the way. Exact for a translation and a scale; under a
+    /// rotation, each rectangle becomes its bounding box. For what a renderer draws unrotated.
+    pub fn untransformed(
+        &self,
+        bounds: Bounds<ScaledPixels>,
+    ) -> (Bounds<ScaledPixels>, ContentMask<ScaledPixels>, f32) {
+        let transform = self.transform;
+        if transform == TransformationMatrix::unit() {
+            return (bounds, *self, 1.0);
+        }
+        let apply = |point: Point<ScaledPixels>| {
+            let point = transform.apply(point.map(|value| px(value.0)));
+            point.map(|value| ScaledPixels(value.0))
+        };
+        let scale = transform.length_scale();
+        let mask = ContentMask {
+            bounds: transform.transform_bounds(self.bounds),
+            rounded: transform.transform_bounds(self.rounded),
+            corner_radii: self.corner_radii.map(|radius| *radius * scale),
+            fade_from: apply(self.fade_from),
+            fade_to: apply(self.fade_to),
+            transform: TransformationMatrix::unit(),
+        };
+        (transform.transform_bounds(bounds), mask, scale)
     }
 }
 
@@ -4684,6 +4728,50 @@ impl Window {
         }
     }
 
+    /// Invoke the given function with what it paints and the hitboxes it inserts moved, scaled or
+    /// rotated by `transformation`, which maps the coordinates they are laid out in to the current
+    /// ones, its translation in logical pixels. Hit testing maps the mouse back through it, so a
+    /// scaled or rotated element is hovered and clicked where it is drawn. Call it in prepaint and
+    /// in paint alike, around the same elements.
+    ///
+    /// The current content mask is carried into the new coordinates by its bounding box, so under
+    /// a rotation, content can show slightly past an outer mask's corners. A platform view, a
+    /// surface and a backdrop blur are drawn at their transformed bounding box, unrotated.
+    pub fn with_transformation<R>(
+        &mut self,
+        transformation: TransformationMatrix,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint_or_prepaint();
+        if transformation == TransformationMatrix::unit() {
+            return f(self);
+        }
+        let current = self.content_mask();
+        let transform = current.transform.compose(transformation);
+        let mask = match transformation.inverse() {
+            Some(inverse) => {
+                let radius_scale = inverse.length_scale();
+                ContentMask {
+                    bounds: inverse.transform_bounds(current.bounds),
+                    rounded: inverse.transform_bounds(current.rounded),
+                    corner_radii: current.corner_radii.map(|radius| *radius * radius_scale),
+                    fade_from: inverse.apply(current.fade_from),
+                    fade_to: inverse.apply(current.fade_to),
+                    transform,
+                }
+            }
+            // Flattened to a line or a point: nothing under it can be seen or hovered.
+            None => ContentMask {
+                transform,
+                ..ContentMask::default()
+            },
+        };
+        self.content_mask_stack.push(mask);
+        let result = f(self);
+        self.content_mask_stack.pop();
+        result
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during the prepaint phase of element drawing.
     pub fn with_element_offset<R>(
@@ -5106,12 +5194,16 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
+        // Renderers blur an unrotated rectangle of the window.
+        let (bounds, content_mask, scale) = self
+            .snapped_content_mask()
+            .untransformed(self.cover_bounds(bounds));
         self.next_frame.scene.insert_primitive(BackdropBlur {
             order: 0,
-            radius: radius.scale(scale_factor),
-            bounds: self.cover_bounds(bounds),
-            content_mask: self.snapped_content_mask(),
-            corner_radii: corner_radii.scale(scale_factor),
+            radius: radius.scale(scale_factor) * scale,
+            bounds,
+            content_mask,
+            corner_radii: corner_radii.scale(scale_factor).map(|radius| *radius * scale),
         });
     }
 
@@ -5226,6 +5318,7 @@ impl Window {
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
+            pad: [0; 2],
         };
         self.insert_quad(quad);
     }
@@ -5759,8 +5852,10 @@ impl Window {
 
         self.invalidator.debug_assert_paint();
 
-        let bounds = self.snap_bounds(bounds);
-        let content_mask = self.snapped_content_mask();
+        // Renderers draw a surface as an unrotated rectangle of the window.
+        let (bounds, content_mask, _) = self
+            .snapped_content_mask()
+            .untransformed(self.snap_bounds(bounds));
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
@@ -11743,5 +11838,165 @@ mod inspector_tests {
             }
         })
         .expect("closed inspector has no bookkeeping and no style overrides");
+    }
+}
+
+#[cfg(test)]
+mod transformation_tests {
+    use super::*;
+    use crate::{
+        AppContext as _, Context, IntoElement, Render, Styled as _, TestAppContext, Transformation,
+        div, point, px, radians, size,
+    };
+
+    struct Root {
+        transformation: Transformation,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(200.)).child(
+                div()
+                    .id("box")
+                    .absolute()
+                    .left(px(50.))
+                    .top(px(50.))
+                    .size(px(20.))
+                    .bg(crate::red())
+                    .on_click(|_, _, _| {})
+                    .transform(self.transformation),
+            )
+        }
+    }
+
+    /// Whether the box's hitbox is hit at each of `points`, after drawing it with
+    /// `transformation`.
+    fn hits(
+        cx: &mut TestAppContext,
+        transformation: Transformation,
+        points: &[Point<Pixels>],
+    ) -> Vec<bool> {
+        let window = cx.add_window(|_, _| Root { transformation });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let frame = &window.rendered_frame;
+            let local = Bounds::new(point(px(50.), px(50.)), size(px(20.), px(20.)));
+            let hitbox = frame
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.bounds == local)
+                .expect("the box's hitbox, in its own coordinates")
+                .id;
+            points
+                .iter()
+                .map(|point| frame.hit_test(*point).ids.contains(&hitbox))
+                .collect()
+        })
+        .expect("draw window")
+    }
+
+    #[gpui::test]
+    fn a_scaled_element_is_hit_where_it_is_drawn(cx: &mut TestAppContext) {
+        // Scaled twice about its center (60, 60), the box covers 40..80.
+        let scale = Transformation::scale(size(2., 2.));
+        assert_eq!(
+            hits(
+                cx,
+                scale,
+                &[
+                    point(px(42.), px(42.)),
+                    point(px(78.), px(60.)),
+                    point(px(38.), px(60.)),
+                    point(px(82.), px(82.)),
+                ]
+            ),
+            [true, true, false, false]
+        );
+    }
+
+    #[gpui::test]
+    fn a_rotated_element_is_hit_where_it_is_drawn(cx: &mut TestAppContext) {
+        // Turned 45 degrees about (60, 60), the box is a diamond reaching 14.1 from its center.
+        let turn = Transformation::rotate(radians(std::f32::consts::FRAC_PI_4));
+        assert_eq!(
+            hits(
+                cx,
+                turn,
+                &[
+                    point(px(60.), px(47.)),
+                    point(px(73.), px(60.)),
+                    point(px(52.), px(52.)),
+                    point(px(69.), px(51.)),
+                ]
+            ),
+            [true, true, false, false]
+        );
+    }
+
+    #[gpui::test]
+    fn a_moved_element_paints_its_quad_under_the_transformation(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Root {
+            transformation: Transformation::translate(point(px(30.), px(-10.))),
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let scale_factor = window.scale_factor();
+            let quad = window
+                .rendered_frame
+                .scene
+                .quads
+                .iter()
+                .find(|quad| quad.background.solid == crate::red())
+                .expect("the box's quad");
+            assert_eq!(
+                quad.bounds,
+                Bounds::new(point(px(50.), px(50.)), size(px(20.), px(20.))).scale(scale_factor)
+            );
+            assert_eq!(
+                quad.content_mask.transform,
+                TransformationMatrix::unit()
+                    .translate(point(px(30.), px(-10.)).scale(scale_factor))
+            );
+        })
+        .expect("draw window");
+    }
+
+    #[test]
+    fn a_transformation_and_its_inverse_cancel() {
+        let transformation = TransformationMatrix::unit()
+            .translate(point(ScaledPixels(7.), ScaledPixels(-3.)))
+            .rotate(radians(0.6))
+            .scale(size(2., 0.5));
+        let inverse = transformation.inverse().expect("an invertible transformation");
+        let point = point(px(11.), px(5.));
+        let back = inverse.apply(transformation.apply(point));
+        assert!((back.x.0 - point.x.0).abs() < 1e-4 && (back.y.0 - point.y.0).abs() < 1e-4);
+        assert!(
+            TransformationMatrix::unit()
+                .scale(size(0., 1.))
+                .inverse()
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn a_flattened_element_is_neither_drawn_nor_hit(cx: &mut TestAppContext) {
+        let flat = Transformation::scale(size(0., 1.));
+        let window = cx.add_window(|_, _| Root {
+            transformation: flat,
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let frame = &window.rendered_frame;
+            assert!(
+                !frame
+                    .scene
+                    .quads
+                    .iter()
+                    .any(|quad| quad.background.solid == crate::red())
+            );
+            assert!(frame.hit_test(point(px(60.), px(60.))).ids.is_empty());
+        })
+        .expect("draw window");
     }
 }

@@ -2907,15 +2907,15 @@ mod tests {
 
     #[test]
     fn webgl_record_sizes_match_shader_word_strides() {
-        assert_eq!(std::mem::size_of::<Quad>(), 52 * 4);
-        assert_eq!(std::mem::size_of::<Shadow>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<Quad>(), 60 * 4);
+        assert_eq!(std::mem::size_of::<Shadow>(), 46 * 4);
         assert_eq!(std::mem::size_of::<PathTile>(), 14 * 4);
         assert_eq!(std::mem::size_of::<PathCurve>(), 10 * 4);
-        assert_eq!(std::mem::size_of::<PathPaint>(), 40 * 4);
-        assert_eq!(std::mem::size_of::<Underline>(), 28 * 4);
-        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 40 * 4);
-        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 40 * 4);
-        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 36 * 4);
+        assert_eq!(std::mem::size_of::<PathPaint>(), 46 * 4);
+        assert_eq!(std::mem::size_of::<Underline>(), 34 * 4);
+        assert_eq!(std::mem::size_of::<MonochromeSprite>(), 46 * 4);
+        assert_eq!(std::mem::size_of::<SubpixelSprite>(), 46 * 4);
+        assert_eq!(std::mem::size_of::<PolychromeSprite>(), 42 * 4);
     }
 
     #[test]
@@ -2986,6 +2986,7 @@ mod tests {
                 bottom: 32.0.into(),
                 left: 33.0.into(),
             },
+            pad: [0; 2],
         };
 
         let bytes = unsafe { WgpuRendererCore::instance_bytes(std::slice::from_ref(&quad)) };
@@ -3015,6 +3016,13 @@ mod tests {
                 // Its fade's two points, none.
                 0,
                 0,
+                0,
+                0,
+                // Its transformation, the unit one.
+                1.0_f32.to_bits(),
+                0,
+                0,
+                1.0_f32.to_bits(),
                 0,
                 0,
                 1,
@@ -3047,6 +3055,9 @@ mod tests {
                 31.0_f32.to_bits(),
                 32.0_f32.to_bits(),
                 33.0_f32.to_bits(),
+                // Padding to a whole texel.
+                0,
+                0,
             ]
         );
     }

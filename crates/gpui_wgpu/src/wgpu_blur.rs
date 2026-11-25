@@ -450,6 +450,7 @@ mod tests {
                 border_color: Hsla::transparent_black(),
                 corner_radii: Corners::default(),
                 border_widths: Edges::default(),
+                pad: [0; 2],
             }
         }
 

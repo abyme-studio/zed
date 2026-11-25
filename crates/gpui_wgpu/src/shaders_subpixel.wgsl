@@ -30,10 +30,11 @@ fn vs_subpixel_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_i
     let sprite = b_subpixel_sprites[instance_id];
 
     var out = SubpixelSpriteOutput();
-    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
+    let position = transform_point(sprite.transformation, unit_vertex * sprite.bounds.size + sprite.bounds.origin);
+    out.position = to_device_position_impl(to_window(position, sprite.content_mask));
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.color = hsla_to_rgba(sprite.color);
-    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask.bounds, sprite.transformation);
+    out.clip_distances = distance_from_clip_rect_impl(position, sprite.content_mask.bounds);
     out.sprite_id = instance_id;
     return out;
 }
@@ -54,6 +55,7 @@ fn fs_subpixel_sprite(input: SubpixelSpriteOutput) -> SubpixelSpriteFragmentOutp
     var out = SubpixelSpriteFragmentOutput();
     out.foreground = vec4<f32>(input.color.rgb, 1.0);
     let mask = b_subpixel_sprites[input.sprite_id].content_mask;
-    out.alpha = vec4<f32>(input.color.a * alpha_corrected * content_mask_alpha(input.position.xy, mask), 1.0);
+    out.alpha = vec4<f32>(input.color.a * alpha_corrected
+        * content_mask_alpha(from_window(input.position.xy, mask), mask), 1.0);
     return out;
 }

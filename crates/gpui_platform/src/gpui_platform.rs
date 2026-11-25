@@ -230,3 +230,182 @@ mod tests {
         assert!(*task_ran.borrow());
     }
 }
+
+/// Elements drawn under transformations, through each renderer this platform has, read back as
+/// pixels.
+#[cfg(all(test, target_os = "macos", feature = "test-support"))]
+mod transformation_tests {
+    use gpui::{
+        AnyElement, AppContext as _, Context, HeadlessAppContext, IntoElement,
+        ParentElement as _, PlatformHeadlessRenderer, Render, Styled as _, Transformation, Window,
+        div, point, px, radians, rgb, size,
+    };
+    use std::sync::Arc;
+
+    type Renderer = fn() -> anyhow::Result<Option<Box<dyn PlatformHeadlessRenderer>>>;
+
+    fn metal() -> anyhow::Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
+        Ok(Some(Box::new(
+            gpui_macos::metal_renderer::MetalHeadlessRenderer::new()?,
+        )))
+    }
+
+    fn wgpu() -> anyhow::Result<Option<Box<dyn PlatformHeadlessRenderer>>> {
+        Ok(Some(Box::new(gpui_wgpu::WgpuHeadlessRenderer::new()?)))
+    }
+
+    const RENDERERS: [(&str, Renderer); 2] = [("metal", metal), ("wgpu", wgpu)];
+
+    struct Scene(fn() -> AnyElement);
+
+    impl Render for Scene {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(64.)).bg(rgb(0x000000)).child((self.0)())
+        }
+    }
+
+    /// The 64-by-64 scene drawn by `renderer`, and its pixels per logical pixel.
+    fn draw(renderer: Renderer, scene: fn() -> AnyElement) -> (image::RgbaImage, u32) {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_apple::AppleTextSystem::new()),
+            Arc::new(()),
+            renderer,
+        );
+        let window = cx
+            .open_window(size(px(64.), px(64.)), |_, cx| cx.new(|_| Scene(scene)))
+            .expect("a headless window");
+        cx.run_until_parked();
+        let image = cx
+            .capture_screenshot(window.into())
+            .expect("a screenshot");
+        let scale = image.width() / 64;
+        (image, scale)
+    }
+
+    /// Whether the pixel at logical `(x, y)` is mostly red.
+    fn is_red(image: &image::RgbaImage, scale: u32, x: f32, y: f32) -> bool {
+        let pixel = image.get_pixel((x * scale as f32) as u32, (y * scale as f32) as u32).0;
+        pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60
+    }
+
+    fn red_box() -> gpui::Div {
+        div().absolute().bg(rgb(0xff0000))
+    }
+
+    #[test]
+    fn a_scaled_box_is_drawn_twice_as_large() {
+        for (name, renderer) in RENDERERS {
+            // 16 wide at 16, scaled twice about its center: 8..40.
+            let (image, scale) = draw(renderer, || {
+                red_box()
+                    .left(px(16.))
+                    .top(px(16.))
+                    .size(px(16.))
+                    .transform(Transformation::scale(size(2., 2.)))
+                    .into_any_element()
+            });
+            for (x, y, red) in [
+                (9., 9., true),
+                (39., 24., true),
+                (24., 39., true),
+                (6., 24., false),
+                (42., 42., false),
+            ] {
+                assert_eq!(is_red(&image, scale, x, y), red, "{name} at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_rotated_box_is_drawn_as_a_diamond() {
+        for (name, renderer) in RENDERERS {
+            // 20 wide at 22, turned 45 degrees about (32, 32): a diamond reaching 14.1.
+            let (image, scale) = draw(renderer, || {
+                red_box()
+                    .left(px(22.))
+                    .top(px(22.))
+                    .size(px(20.))
+                    .transform(Transformation::rotate(radians(std::f32::consts::FRAC_PI_4)))
+                    .into_any_element()
+            });
+            for (x, y, red) in [
+                (32., 32., true),
+                (32., 19.5, true),
+                (44.5, 32., true),
+                (23.5, 23.5, false),
+                (40.5, 40.5, false),
+            ] {
+                assert_eq!(is_red(&image, scale, x, y), red, "{name} at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_moved_clip_cuts_its_children_where_it_is_drawn() {
+        for (name, renderer) in RENDERERS {
+            // A 32-wide clip of a 64-wide red fill, at 8, moved by 16: it shows 24..56.
+            let (image, scale) = draw(renderer, || {
+                div()
+                    .absolute()
+                    .left(px(8.))
+                    .top(px(8.))
+                    .size(px(32.))
+                    .overflow_hidden()
+                    .transform(Transformation::translate(point(px(16.), px(16.))))
+                    .child(div().size(px(64.)).bg(rgb(0xff0000)))
+                    .into_any_element()
+            });
+            for (x, y, red) in [
+                (40., 40., true),
+                (26., 26., true),
+                (54., 54., true),
+                (58., 40., false),
+                (40., 58., false),
+                (12., 12., false),
+            ] {
+                assert_eq!(is_red(&image, scale, x, y), red, "{name} at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_text_turns_with_its_box() {
+        for (name, renderer) in RENDERERS {
+            fn text(turn: f32) -> impl IntoElement {
+                div()
+                    .absolute()
+                    .left(px(4.))
+                    .top(px(24.))
+                    .w(px(56.))
+                    .h(px(16.))
+                    .text_size(px(14.))
+                    .text_color(rgb(0xff0000))
+                    .child("IIIIIIIIIIII")
+                    .transform(Transformation::rotate(radians(turn)))
+            }
+            let (flat, scale) = draw(renderer, || text(0.).into_any_element());
+            let (turned, _) = draw(renderer, || {
+                text(std::f32::consts::FRAC_PI_2).into_any_element()
+            });
+            let extent = |image: &image::RgbaImage| {
+                let mut min = (u32::MAX, u32::MAX);
+                let mut max = (0, 0);
+                for (x, y, pixel) in image.enumerate_pixels() {
+                    if pixel.0[0] > 128 {
+                        min = (min.0.min(x), min.1.min(y));
+                        max = (max.0.max(x), max.1.max(y));
+                    }
+                }
+                assert!(max.0 >= min.0, "{name}: no text drawn");
+                ((max.0 - min.0) / scale, (max.1 - min.1) / scale)
+            };
+            let (flat_width, flat_height) = extent(&flat);
+            let (turned_width, turned_height) = extent(&turned);
+            assert!(flat_width > flat_height * 2, "{name}: flat {flat_width}x{flat_height}");
+            assert!(
+                turned_height > turned_width * 2,
+                "{name}: turned {turned_width}x{turned_height}"
+            );
+        }
+    }
+}

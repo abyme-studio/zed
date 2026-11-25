@@ -3,7 +3,7 @@ use crate::{
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
     FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
     SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
-    TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
+    TextStyleRefinement, Transformation, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -752,6 +752,13 @@ pub trait Styled: Sized {
     /// Sets the opacity of this element and its children.
     fn opacity(mut self, opacity: f32) -> Self {
         self.style().opacity = Some(opacity);
+        self
+    }
+
+    /// Scales, rotates and moves this element and its children where they are painted and hit
+    /// tested, about the element's center, leaving layout unchanged. As CSS's `transform`.
+    fn transform(mut self, transformation: Transformation) -> Self {
+        self.style().transformation = Some(transformation);
         self
     }
 

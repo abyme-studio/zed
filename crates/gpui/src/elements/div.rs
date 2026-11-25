@@ -23,8 +23,9 @@ use crate::{
     KeyboardButton, KeyboardClickEvent, LayoutId, LongPressEvent, ModifiersChangedEvent,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement, PinchEvent, Pixels,
-    Point, Render, ScrollDelta, ScrollEvent, SharedString, Size, Style, StyleRefinement, Styled, Task,
-    TooltipId, TouchPhase, Visibility, Window, WindowControlArea, point, px, size,
+    Point, Render, ScrollDelta, ScrollEvent, SharedString, Size, Style, StyleRefinement, Styled,
+    Task, TooltipId, TouchPhase, TransformationMatrix, Visibility, Window, WindowControlArea,
+    point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -2223,6 +2224,15 @@ pub(crate) struct AriaProperties {
     pub(crate) column_count: Option<usize>,
 }
 
+/// The transformation a style asks for, about the center of the element's `bounds`, in logical
+/// pixels: the unit transformation when it asks for none.
+fn style_transformation(style: &Style, bounds: Bounds<Pixels>) -> TransformationMatrix {
+    style
+        .transformation
+        .map(|transformation| transformation.into_matrix(bounds.center(), 1.0))
+        .unwrap_or_default()
+}
+
 /// The interactivity struct. Powers all of the general-purpose
 /// interactivity in the `Div` element.
 #[derive(Default)]
@@ -2483,23 +2493,26 @@ impl Interactivity {
                 }
 
                 window.with_text_style(style.text_style().cloned(), |window| {
-                    window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
-                        |window| {
-                            let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
-                            } else {
-                                None
-                            };
+                    window.with_transformation(style_transformation(&style, bounds), |window| {
+                        window.with_content_mask(
+                            style.overflow_mask(bounds, window.rem_size()),
+                            |window| {
+                                let hitbox = if self.should_insert_hitbox(&style, window, cx) {
+                                    Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                                } else {
+                                    None
+                                };
 
-                            let scroll_offset =
-                                self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = window.with_element_opacity(style.opacity, |window| {
-                                f(&style, scroll_offset, hitbox, window, cx)
-                            });
-                            (result, element_state)
-                        },
-                    )
+                                let scroll_offset =
+                                    self.clamp_scroll_position(bounds, &style, window, cx);
+                                let result =
+                                    window.with_element_opacity(style.opacity, |window| {
+                                        f(&style, scroll_offset, hitbox, window, cx)
+                                    });
+                                (result, element_state)
+                            },
+                        )
+                    })
                 })
             },
         )
@@ -2652,7 +2665,8 @@ impl Interactivity {
                     tab_group = self.tab_index;
                 }
 
-                window.with_element_opacity(style.opacity, |window| {
+                let transformation = style_transformation(&style, bounds);
+                window.with_transformation(transformation, |window| window.with_element_opacity(style.opacity, |window| {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
                             window.with_content_mask(
@@ -2742,7 +2756,7 @@ impl Interactivity {
                             );
                         });
                     });
-                });
+                }));
 
                 ((), element_state)
             },

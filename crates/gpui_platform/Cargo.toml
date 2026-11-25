@@ -69,6 +69,13 @@ criterion.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos.workspace = true
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# Pixel tests draw through wgpu's Metal backend as well as gpui_macos's renderer.
+gpui_wgpu = { workspace = true, features = ["test-support"] }
+# Text for the pixel tests, without a Mac platform, which must be made on the main thread.
+gpui_apple = { workspace = true, features = ["font-kit"] }
+image.workspace = true
+
 [target.'cfg(target_os = "ios")'.dependencies]
 gpui_ios.workspace = true
 

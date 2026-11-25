@@ -549,10 +549,18 @@ impl Primitive {
         }
     }
 
+    /// Where the primitive can draw, in the window: its bounds, moved by its own transformation
+    /// and cut by its mask in the mask's coordinates, then moved by the mask's transformation.
     fn clipped_bounds(&self) -> Bounds<ScaledPixels> {
-        self.transformation()
+        let mask = self.content_mask();
+        let clipped = self
+            .transformation()
             .transform_bounds(*self.bounds())
-            .intersect(&self.content_mask().bounds)
+            .intersect(&mask.bounds);
+        if clipped.is_empty() {
+            return clipped;
+        }
+        mask.transform.transform_bounds(clipped)
     }
 
     pub fn content_mask(&self) -> &ContentMask<ScaledPixels> {
@@ -905,6 +913,8 @@ pub struct Quad {
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
+    /// A whole number of 16-byte texels, for renderers that read quads from a texture.
+    pub pad: [u32; 2],
 }
 
 impl From<Quad> for Primitive {
@@ -1052,7 +1062,11 @@ impl TransformationMatrix {
     }
 
     /// The smallest bounds that contain `bounds` once it is transformed.
-    pub(crate) fn transform_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+    pub(crate) fn transform_bounds<P>(&self, bounds: Bounds<P>) -> Bounds<P>
+    where
+        P: Copy + Clone + Debug + Default + PartialEq + PartialOrd + Into<f32> + From<f32>,
+        P: std::ops::Add<Output = P> + std::ops::Sub<Output = P>,
+    {
         if *self == Self::unit() {
             return bounds;
         }
@@ -1065,15 +1079,57 @@ impl TransformationMatrix {
             bounds.bottom_right(),
         ]
         .map(|corner| {
+            let (x, y): (f32, f32) = (corner.x.into(), corner.y.into());
             Point::new(
-                ScaledPixels(xx * corner.x.0 + xy * corner.y.0 + translate_x),
-                ScaledPixels(yx * corner.x.0 + yy * corner.y.0 + translate_y),
+                P::from(xx * x + xy * y + translate_x),
+                P::from(yx * x + yy * y + translate_y),
             )
         });
         let [first, rest @ ..] = corners;
         let top_left = rest.iter().fold(first, |min, corner| min.min(corner));
         let bottom_right = rest.iter().fold(first, |max, corner| max.max(corner));
         Bounds::from_corners(top_left, bottom_right)
+    }
+
+    /// The transformation that undoes this one, or `None` when this one flattens the plane to a
+    /// line or a point, as a scale of zero does.
+    pub fn inverse(&self) -> Option<Self> {
+        if *self == Self::unit() {
+            return Some(*self);
+        }
+        let [[a, b], [c, d]] = self.rotation_scale;
+        let determinant = a * d - b * c;
+        if determinant.abs() <= f32::EPSILON || !determinant.is_finite() {
+            return None;
+        }
+        let rotation_scale = [
+            [d / determinant, -b / determinant],
+            [-c / determinant, a / determinant],
+        ];
+        let [x, y] = self.translation;
+        Some(Self {
+            rotation_scale,
+            translation: [
+                -(rotation_scale[0][0] * x + rotation_scale[0][1] * y),
+                -(rotation_scale[1][0] * x + rotation_scale[1][1] * y),
+            ],
+        })
+    }
+
+    /// This transformation with its translation multiplied by `factor`: the same
+    /// transformation in units `factor` times smaller, as from logical to device pixels.
+    pub fn scale_translation(self, factor: f32) -> Self {
+        Self {
+            rotation_scale: self.rotation_scale,
+            translation: [self.translation[0] * factor, self.translation[1] * factor],
+        }
+    }
+
+    /// How much this transformation scales an area, as a factor of length: the square root of
+    /// its determinant's magnitude. 1 for a rotation or a translation.
+    pub fn length_scale(&self) -> f32 {
+        let [[a, b], [c, d]] = self.rotation_scale;
+        (a * d - b * c).abs().sqrt()
     }
 
     /// Apply transformation to a point, mainly useful for debugging

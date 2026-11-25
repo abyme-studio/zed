@@ -2680,6 +2680,7 @@ impl From<Pixels> for Corners<Pixels> {
     PartialEq,
     Serialize,
     Deserialize,
+    JsonSchema,
     Debug,
 )]
 #[repr(transparent)]
@@ -3251,6 +3252,12 @@ impl From<ScaledPixels> for u32 {
 impl From<f32> for ScaledPixels {
     fn from(pixels: f32) -> Self {
         Self(pixels)
+    }
+}
+
+impl From<ScaledPixels> for f32 {
+    fn from(pixels: ScaledPixels) -> Self {
+        pixels.0
     }
 }
 
