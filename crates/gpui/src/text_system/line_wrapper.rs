@@ -1,4 +1,4 @@
-use crate::{FontId, Pixels, SharedString, TextRun, TextSystem, px};
+use crate::{FontId, Pixels, SharedString, TextRun, TextSystem, WordBreak, px};
 use collections::HashMap;
 use std::{borrow::Cow, iter, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
@@ -24,6 +24,15 @@ pub enum IndentAdjustment {
     SameIndent,
     /// Add N extra columns of indent (in space-character widths).
     ExtraColumns(u32),
+}
+
+/// How a paragraph's text breaks into lines, besides the width it wraps to.
+/// Part of the line layout cache's key, so text laid out with different options
+/// never shares a layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct WrapOptions {
+    /// Where a line may break.
+    pub word_break: WordBreak,
 }
 
 /// The GPUI line wrapper, used to wrap lines of text to a given width.

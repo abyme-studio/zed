@@ -1,10 +1,11 @@
 use crate::{
     Bounds, FontId, GlyphId, Pixels, PlatformTextSystem, Point, SharedString, Size, TextAlign,
-    point, px, size,
+    WordBreak, point, px, size,
 };
 use collections::{FxHashMap, FxHashSet};
 use itertools::Itertools;
 use smallvec::SmallVec;
+use unicode_segmentation::UnicodeSegmentation;
 use std::{
     borrow::Borrow,
     cell::RefCell,
@@ -16,7 +17,7 @@ use std::{
     },
 };
 
-use super::LineWrapper;
+use super::{LineWrapper, WrapOptions};
 
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
@@ -235,6 +236,7 @@ impl LineLayout {
         (left, right)
     }
 
+    #[cfg(test)]
     fn compute_wrap_boundaries(
         &self,
         text: &str,
@@ -242,7 +244,14 @@ impl LineLayout {
         max_lines: Option<usize>,
         scratch: &mut WrapScratch,
     ) -> SmallVec<[WrapBoundary; 1]> {
-        self.compute_wrap_boundaries_with_inline_objects(text, wrap_width, max_lines, &[], scratch)
+        self.compute_wrap_boundaries_with_inline_objects(
+            text,
+            wrap_width,
+            max_lines,
+            &[],
+            WordBreak::Normal,
+            scratch,
+        )
     }
 
     fn compute_wrap_boundaries_with_inline_objects(
@@ -251,6 +260,7 @@ impl LineLayout {
         wrap_width: Pixels,
         max_lines: Option<usize>,
         inline_objects: &[InlineObject],
+        word_break: WordBreak,
         scratch: &mut WrapScratch,
     ) -> SmallVec<[WrapBoundary; 1]> {
         let mut boundaries = SmallVec::new();
@@ -294,9 +304,20 @@ impl LineLayout {
                 .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index)),
         );
         break_indices.clear();
-        break_indices.extend(
-            LineWrapper::break_indices(break_source).filter(|index| glyph_indices.contains(index)),
-        );
+        match word_break {
+            WordBreak::Normal => break_indices.extend(
+                LineWrapper::break_indices(break_source)
+                    .filter(|index| glyph_indices.contains(index)),
+            ),
+            // Every grapheme starts a segment of its own, so a line may end after any of them.
+            // A shaped cluster still holds together, as its parts share one glyph index.
+            WordBreak::BreakAll => break_indices.extend(
+                break_source
+                    .grapheme_indices(true)
+                    .map(|(index, _)| index)
+                    .filter(|index| *index > 0 && glyph_indices.contains(index)),
+            ),
+        }
         let mut glyphs = self
             .runs
             .iter()
@@ -832,6 +853,7 @@ impl LineLayoutCache {
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
+        wrap_options: WrapOptions,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -844,6 +866,7 @@ impl LineLayoutCache {
             wrap_width,
             max_lines,
             &[],
+            wrap_options,
         )
     }
 
@@ -855,6 +878,7 @@ impl LineLayoutCache {
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
         inline_objects: &[InlineObject],
+        wrap_options: WrapOptions,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -868,6 +892,7 @@ impl LineLayoutCache {
             wrap_width,
             force_width: None,
             inline_objects,
+            wrap_options,
         } as &dyn AsCacheKeyRef;
 
         let state = self.state.borrow();
@@ -899,18 +924,12 @@ impl LineLayoutCache {
                 )
             };
             let wrap_boundaries = match wrap_width {
-                Some(wrap_width) if inline_objects.is_empty() => unwrapped_layout
-                    .compute_wrap_boundaries(
-                        text.as_ref(),
-                        wrap_width,
-                        max_lines,
-                        &mut self.wrap_scratch.borrow_mut(),
-                    ),
                 Some(wrap_width) => unwrapped_layout.compute_wrap_boundaries_with_inline_objects(
                     text.as_ref(),
                     wrap_width,
                     max_lines,
                     inline_objects,
+                    wrap_options.word_break,
                     &mut self.wrap_scratch.borrow_mut(),
                 ),
                 None => SmallVec::new(),
@@ -930,6 +949,7 @@ impl LineLayoutCache {
                 wrap_width,
                 force_width: None,
                 inline_objects: inline_objects_arc,
+                wrap_options,
             });
 
             let mut state = self.state.borrow_mut();
@@ -991,6 +1011,7 @@ impl LineLayoutCache {
             wrap_width: None,
             force_width,
             inline_objects,
+            wrap_options: WrapOptions::default(),
         } as &dyn AsCacheKeyRef;
 
         let state = self.state.borrow();
@@ -1038,6 +1059,7 @@ impl LineLayoutCache {
                 wrap_width: None,
                 force_width,
                 inline_objects: inline_objects_arc,
+                wrap_options: WrapOptions::default(),
             });
             let layout = Arc::new(layout);
             current_frame.lines.insert(key.clone(), layout.clone());
@@ -1157,6 +1179,7 @@ struct CacheKey {
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
     inline_objects: Option<Arc<[InlineObject]>>,
+    wrap_options: WrapOptions,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -1167,6 +1190,7 @@ struct CacheKeyRef<'a> {
     wrap_width: Option<Pixels>,
     force_width: Option<Pixels>,
     inline_objects: &'a [InlineObject],
+    wrap_options: WrapOptions,
 }
 
 impl Hash for CacheKeyRef<'_> {
@@ -1179,6 +1203,7 @@ impl Hash for CacheKeyRef<'_> {
         if !self.inline_objects.is_empty() {
             self.inline_objects.hash(state);
         }
+        self.wrap_options.hash(state);
     }
 }
 
@@ -1205,6 +1230,7 @@ impl AsCacheKeyRef for CacheKey {
             wrap_width: self.wrap_width,
             force_width: self.force_width,
             inline_objects: self.inline_objects.as_deref().unwrap_or(&[]),
+            wrap_options: self.wrap_options,
         }
     }
 }
@@ -1921,5 +1947,82 @@ mod tests {
         for (ix, (plain_x, wide_x)) in plain_x.iter().zip(&wide_x).enumerate() {
             assert_eq!(*wide_x, *plain_x + px(3.) * ix as f32);
         }
+    }
+
+    fn wrap_indices(layout: &WrappedLineLayout) -> Vec<usize> {
+        layout
+            .wrap_boundaries
+            .iter()
+            .map(|boundary| {
+                layout.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+            })
+            .collect()
+    }
+
+    #[test]
+    fn break_all_breaks_between_any_graphemes() {
+        let text = "ab cdefgh";
+        let mut layout = make_layout(
+            (0..text.len())
+                .map(|index| glyph_at(index as f32 * 10., index))
+                .collect(),
+        );
+        layout.width = px(90.);
+        layout.len = text.len();
+        let wrap = |word_break| {
+            layout
+                .compute_wrap_boundaries_with_inline_objects(
+                    text,
+                    px(50.),
+                    None,
+                    &[],
+                    word_break,
+                    &mut WrapScratch::default(),
+                )
+                .into_iter()
+                .map(|boundary| boundary.glyph_ix)
+                .collect::<Vec<_>>()
+        };
+
+        // Normal moves the word to the next line, then breaks it where it overflows.
+        assert_eq!(wrap(WordBreak::Normal), vec![3, 8]);
+        // Break-all fills the line and breaks inside the word.
+        assert_eq!(wrap(WordBreak::BreakAll), vec![5]);
+    }
+
+    #[test]
+    fn word_break_reaches_the_shaped_text_and_keys_the_cache() {
+        let text_system =
+            WindowTextSystem::new(Arc::new(TextSystem::new(Arc::new(NoopTextSystem::new()))));
+        let text = SharedString::from("ab cdefgh");
+        let runs = [TextRun {
+            len: text.len(),
+            font: font(".ZedMono"),
+            ..Default::default()
+        }];
+        let em_run = TextRun {
+            len: 1,
+            ..runs[0].clone()
+        };
+        let em = text_system
+            .shape_line("m".into(), px(10.), &[em_run], None)
+            .width;
+        let shape = |word_break| {
+            text_system
+                .shape_text_with_options(
+                    text.clone(),
+                    px(10.),
+                    &runs,
+                    Some(em * 5.),
+                    None,
+                    &[],
+                    WrapOptions { word_break },
+                )
+                .unwrap()
+        };
+
+        assert_eq!(wrap_indices(&shape(WordBreak::Normal)[0].layout), vec![3, 8]);
+        assert_eq!(wrap_indices(&shape(WordBreak::BreakAll)[0].layout), vec![5]);
+        assert_eq!(wrap_indices(&shape(WordBreak::Normal)[0].layout), vec![3, 8]);
     }
 }

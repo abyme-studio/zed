@@ -9,7 +9,7 @@ use crate::{
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
     PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Transformation,
-    Window, black, phi, point, px, quad, rems, size,
+    Window, WrapOptions, black, phi, point, px, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -573,6 +573,16 @@ pub enum WhiteSpace {
     Nowrap,
 }
 
+/// Where a wrapped line may break, as CSS `word-break`
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum WordBreak {
+    /// Break at word boundaries, and inside a word only when it is too wide for its line
+    #[default]
+    Normal,
+    /// Break between any two graphemes, as CSS `word-break: break-all`
+    BreakAll,
+}
+
 /// How to truncate text that overflows the width of the element
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TextOverflow {
@@ -655,6 +665,9 @@ pub struct TextStyle {
     /// Extra space added after each character, in pixels, as CSS `letter-spacing`.
     /// Negative values tighten the text.
     pub letter_spacing: Option<Pixels>,
+
+    /// Where a wrapped line may break
+    pub word_break: WordBreak,
 }
 
 impl Default for TextStyle {
@@ -677,6 +690,7 @@ impl Default for TextStyle {
             text_align: TextAlign::default(),
             line_clamp: None,
             letter_spacing: None,
+            word_break: WordBreak::Normal,
         }
     }
 }
@@ -747,6 +761,13 @@ impl TextStyle {
             underline: self.underline,
             strikethrough: self.strikethrough,
             letter_spacing: self.letter_spacing,
+        }
+    }
+
+    /// The options that shape how this style's text breaks into lines.
+    pub fn wrap_options(&self) -> WrapOptions {
+        WrapOptions {
+            word_break: self.word_break,
         }
     }
 }

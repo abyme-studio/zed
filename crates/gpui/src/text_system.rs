@@ -794,6 +794,29 @@ impl WindowTextSystem {
         line_clamp: Option<usize>,
         inline_objects: &[InlineObject],
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
+        self.shape_text_with_options(
+            text,
+            font_size,
+            runs,
+            wrap_width,
+            line_clamp,
+            inline_objects,
+            WrapOptions::default(),
+        )
+    }
+
+    /// Shape a multi-line string of text with embedded [`InlineObject`] spans, breaking its
+    /// lines as `wrap_options` says. See [`Self::shape_text_with_inline_objects`].
+    pub fn shape_text_with_options(
+        &self,
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap_width: Option<Pixels>,
+        line_clamp: Option<usize>,
+        inline_objects: &[InlineObject],
+        wrap_options: WrapOptions,
+    ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_buffer.take();
 
@@ -860,7 +883,14 @@ impl WindowTextSystem {
             let max_lines = max_wrap_lines.map(|max| max.saturating_sub(wrapped_lines));
             let layout = if inline_objects.is_empty() {
                 self.line_layout_cache
-                    .layout_wrapped_line(&line_text, font_size, &font_runs, wrap_width, max_lines)
+                    .layout_wrapped_line(
+                        &line_text,
+                        font_size,
+                        &font_runs,
+                        wrap_width,
+                        max_lines,
+                        wrap_options,
+                    )
             } else {
                 while let Some(object) = inline_objects.get(inline_object_cursor)
                     && object.range.end <= line_start
@@ -882,12 +912,23 @@ impl WindowTextSystem {
                 let line_slice = &inline_objects[slice_start..inline_object_cursor];
                 if line_slice.is_empty() {
                     self.line_layout_cache.layout_wrapped_line(
-                        &line_text, font_size, &font_runs, wrap_width, max_lines,
+                        &line_text,
+                        font_size,
+                        &font_runs,
+                        wrap_width,
+                        max_lines,
+                        wrap_options,
                     )
                 } else if line_start == 0 {
                     self.line_layout_cache
                         .layout_wrapped_line_with_inline_objects(
-                            &line_text, font_size, &font_runs, wrap_width, max_lines, line_slice,
+                            &line_text,
+                            font_size,
+                            &font_runs,
+                            wrap_width,
+                            max_lines,
+                            line_slice,
+                            wrap_options,
                         )
                 } else {
                     let rebased: SmallVec<[InlineObject; 4]> = line_slice
@@ -902,7 +943,13 @@ impl WindowTextSystem {
                         .collect();
                     self.line_layout_cache
                         .layout_wrapped_line_with_inline_objects(
-                            &line_text, font_size, &font_runs, wrap_width, max_lines, &rebased,
+                            &line_text,
+                            font_size,
+                            &font_runs,
+                            wrap_width,
+                            max_lines,
+                            &rebased,
+                            wrap_options,
                         )
                 }
             };

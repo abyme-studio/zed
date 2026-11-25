@@ -884,13 +884,14 @@ impl TextLayout {
 
                 let Some(lines) = window
                     .text_system()
-                    .shape_text_with_inline_objects(
+                    .shape_text_with_options(
                         shaped_text,
                         font_size,
                         &runs,
                         wrap_width,            // Wrap if we know the width.
                         text_style.line_clamp, // Limit the number of lines if line_clamp is set.
                         &surviving_objects,
+                        text_style.wrap_options(),
                     )
                     .log_err()
                 else {

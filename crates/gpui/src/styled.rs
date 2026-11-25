@@ -4,7 +4,7 @@ use crate::{
     FontWeight, GridAutoFlow, GridPlacement, GridTemplate, GridTemplateEntry, GridTemplateMinSize,
     GridTrack, Hsla, JustifyContent, JustifyItems, JustifySelf, Length, SharedString,
     StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow, TextStyleRefinement,
-    Transformation, UnderlineStyle, WhiteSpace, px, relative, rems,
+    Transformation, UnderlineStyle, WhiteSpace, WordBreak, px, relative, rems,
 };
 pub use gpui_macros::{
     border_style_methods, box_shadow_style_methods, cursor_style_methods, margin_style_methods,
@@ -82,6 +82,13 @@ pub trait Styled: Sized {
     /// [Docs](https://tailwindcss.com/docs/whitespace#nowrap)
     fn whitespace_nowrap(mut self) -> Self {
         self.text_style().white_space = Some(WhiteSpace::Nowrap);
+        self
+    }
+
+    /// Lets a wrapped line break between any two graphemes, as CSS `word-break: break-all`.
+    /// [Docs](https://tailwindcss.com/docs/word-break#break-all)
+    fn break_all(mut self) -> Self {
+        self.text_style().word_break = Some(WordBreak::BreakAll);
         self
     }
 
