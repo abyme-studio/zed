@@ -9,8 +9,7 @@ use crate::{
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
     FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
     PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Transformation,
-    Window, black, phi,
-    point, px, quad, rems, size,
+    Window, black, phi, point, px, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -301,6 +300,14 @@ pub struct Style {
 
     /// The opacity of this element
     pub opacity: Option<f32>,
+
+    /// How far to gray this element and its children, from 0 (unchanged) to 1 (fully gray),
+    /// as CSS's `filter: grayscale()`.
+    pub grayscale: Option<f32>,
+
+    /// What to multiply the colors of this element and its children by: 0 is black, 1
+    /// unchanged, above 1 brighter, as CSS's `filter: brightness()`.
+    pub brightness: Option<f32>,
 
     /// How this element and its children are scaled, rotated and moved where they are painted
     /// and hit tested, about the element's center, as CSS's `transform`. Layout is unchanged.
@@ -825,6 +832,8 @@ impl Default for Style {
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,
+            grayscale: None,
+            brightness: None,
             transformation: None,
             grid_rows: None,
             grid_cols: None,

@@ -1571,9 +1571,9 @@ fn fs_mono_sprite(input: MonoSpriteVarying) -> @location(0) vec4<f32> {
 
 struct PolychromeSprite {
     order: u32,
-    pad: u32,
+    brightness: f32,
     tile: AtlasTile,
-    grayscale: u32,
+    grayscale: f32,
     opacity: f32,
     bounds: Bounds,
     content_mask: ContentMask,
@@ -1597,7 +1597,7 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
     let clipped = clip_to_mask(unit_vertex, sprite.bounds, sprite.content_mask.bounds);
     out.position = to_device_position_impl(to_window(clipped.position, sprite.content_mask));
     out.tile_position = to_tile_position(clipped.unit_vertex, sprite.tile);
-    let simple = !has_rounded_corners(sprite.corner_radii) && sprite.grayscale == 0u
+    let simple = !has_rounded_corners(sprite.corner_radii) && sprite.grayscale == 0.0 && sprite.brightness == 1.0
         && !has_rounded_mask(sprite.content_mask) && is_untransformed(sprite.content_mask);
     out.sprite_id = instance_id | select(0u, SIMPLE_PRIMITIVE_FLAG, simple);
     out.opacity = sprite.opacity;
@@ -1612,9 +1612,8 @@ fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
     }
 
     let sprite = load_poly_sprite(input.sprite_id);
-    if (sprite.grayscale != 0u) {
-        color = vec4<f32>(vec3<f32>(dot(color.rgb, GRAYSCALE_FACTORS)), color.a);
-    }
+    let gray = vec3<f32>(dot(color.rgb, GRAYSCALE_FACTORS));
+    color = vec4<f32>(saturate(mix(color.rgb, gray, sprite.grayscale) * sprite.brightness), color.a);
     let position = from_window(input.position.xy, sprite.content_mask);
     let distance = quad_sdf(position, sprite.bounds, sprite.corner_radii);
     return masked(blend_color(color, input.opacity * saturate(0.5 - distance)),

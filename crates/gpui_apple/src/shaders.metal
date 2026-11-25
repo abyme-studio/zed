@@ -799,7 +799,7 @@ vertex PolychromeSpriteFragmentInput polychrome_sprite_vertex(
   float2 tile_position =
       to_tile_position(clipped.unit_vertex, sprite.tile, atlas_size);
   bool simple = !has_rounded_corners(sprite.corner_radii) &&
-                sprite.grayscale == 0u && !has_rounded_mask(sprite.content_mask) &&
+                sprite.grayscale == 0.0 && sprite.brightness == 1.0 && !has_rounded_mask(sprite.content_mask) &&
                 is_untransformed(sprite.content_mask);
   return PolychromeSpriteFragmentInput{
       device_position,
@@ -821,12 +821,9 @@ fragment float4 polychrome_sprite_fragment(
   }
 
   PolychromeSprite sprite = sprites[input.sprite_id];
-  if (sprite.grayscale) {
-    float grayscale = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
-    color.r = grayscale;
-    color.g = grayscale;
-    color.b = grayscale;
-  }
+  float gray = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+  color.rgb =
+      saturate(mix(color.rgb, float3(gray), sprite.grayscale) * sprite.brightness);
   float2 position = from_window(input.position.xy, sprite.content_mask);
   float distance = quad_sdf(position, sprite.bounds, sprite.corner_radii);
   color.a *= input.opacity * saturate(0.5 - distance) *

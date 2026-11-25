@@ -1622,7 +1622,7 @@ mod tests {
             canvas(
                 |_, _, _| {},
                 move |_, _, window, cx| {
-                    window.with_element_opacity(Some(0.5), |window| paint(window, cx));
+                    window.with_element_effects(Some(0.5), None, None, |window| paint(window, cx));
                 },
             )
             .size_full()

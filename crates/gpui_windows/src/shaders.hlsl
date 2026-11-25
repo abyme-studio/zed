@@ -1380,9 +1380,9 @@ SubpixelSpriteFragmentOutput subpixel_sprite_fragment(MonochromeSpriteFragmentIn
 
 struct PolychromeSprite {
     uint order;
-    uint pad;
+    float brightness;
     AtlasTile tile;
-    uint grayscale;
+    float grayscale;
     float opacity;
     Bounds bounds;
     ContentMask content_mask;
@@ -1409,7 +1409,7 @@ PolychromeSpriteFragmentInput polychrome_sprite_vertex(uint vertex_id: SV_Vertex
     PolychromeSpriteFragmentInput output;
     output.position = device_position;
     output.tile_position = tile_position;
-    bool simple = !has_rounded_corners(sprite.corner_radii) && sprite.grayscale == 0u
+    bool simple = !has_rounded_corners(sprite.corner_radii) && sprite.grayscale == 0.0 && sprite.brightness == 1.0
         && is_untransformed(sprite.content_mask);
     output.sprite_id = sprite_id | (simple ? SIMPLE_PRIMITIVE_FLAG : 0u);
     output.opacity = sprite.opacity;
@@ -1423,9 +1423,8 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     }
 
     PolychromeSprite sprite = poly_sprites[input.sprite_id];
-    if (sprite.grayscale != 0u) {
-        color.rgb = dot(color.rgb, GRAYSCALE_FACTORS);
-    }
+    float3 gray = dot(color.rgb, GRAYSCALE_FACTORS);
+    color.rgb = saturate(lerp(color.rgb, gray, sprite.grayscale) * sprite.brightness);
     float distance = quad_sdf(from_window(input.position.xy, sprite.content_mask), sprite.bounds,
         sprite.corner_radii);
     color.a *= input.opacity * saturate(0.5 - distance);

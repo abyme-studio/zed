@@ -231,14 +231,14 @@ mod tests {
     }
 }
 
-/// Elements drawn under transformations, through each renderer this platform has, read back as
-/// pixels.
+/// Elements drawn under transformations and filters, through each renderer this platform has,
+/// read back as pixels.
 #[cfg(all(test, target_os = "macos", feature = "test-support"))]
-mod transformation_tests {
+mod effect_tests {
     use gpui::{
-        AnyElement, AppContext as _, Context, HeadlessAppContext, IntoElement,
-        ParentElement as _, PlatformHeadlessRenderer, Render, Styled as _, Transformation, Window,
-        div, point, px, radians, rgb, size,
+        AnyElement, AppContext as _, Context, HeadlessAppContext, IntoElement, ParentElement as _,
+        PlatformHeadlessRenderer, Render, RenderImage, Styled as _, Transformation, Window, div,
+        img, point, px, radians, rgb, size,
     };
     use std::sync::Arc;
 
@@ -275,16 +275,16 @@ mod transformation_tests {
             .open_window(size(px(64.), px(64.)), |_, cx| cx.new(|_| Scene(scene)))
             .expect("a headless window");
         cx.run_until_parked();
-        let image = cx
-            .capture_screenshot(window.into())
-            .expect("a screenshot");
+        let image = cx.capture_screenshot(window.into()).expect("a screenshot");
         let scale = image.width() / 64;
         (image, scale)
     }
 
     /// Whether the pixel at logical `(x, y)` is mostly red.
     fn is_red(image: &image::RgbaImage, scale: u32, x: f32, y: f32) -> bool {
-        let pixel = image.get_pixel((x * scale as f32) as u32, (y * scale as f32) as u32).0;
+        let pixel = image
+            .get_pixel((x * scale as f32) as u32, (y * scale as f32) as u32)
+            .0;
         pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60
     }
 
@@ -401,11 +401,91 @@ mod transformation_tests {
             };
             let (flat_width, flat_height) = extent(&flat);
             let (turned_width, turned_height) = extent(&turned);
-            assert!(flat_width > flat_height * 2, "{name}: flat {flat_width}x{flat_height}");
+            assert!(
+                flat_width > flat_height * 2,
+                "{name}: flat {flat_width}x{flat_height}"
+            );
             assert!(
                 turned_height > turned_width * 2,
                 "{name}: turned {turned_width}x{turned_height}"
             );
+        }
+    }
+
+    /// The color at logical `(x, y)`.
+    fn rgb_at(image: &image::RgbaImage, scale: u32, x: f32, y: f32) -> [i32; 3] {
+        let pixel = image
+            .get_pixel((x * scale as f32) as u32, (y * scale as f32) as u32)
+            .0;
+        [pixel[0] as i32, pixel[1] as i32, pixel[2] as i32]
+    }
+
+    fn assert_near(name: &str, actual: [i32; 3], expected: [i32; 3]) {
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(a, e)| (a - e).abs() <= 12),
+            "{name}: {actual:?}, expected about {expected:?}"
+        );
+    }
+
+    #[test]
+    fn a_grayscaled_parent_grays_its_children() {
+        for (name, renderer) in RENDERERS {
+            let (image, scale) = draw(renderer, || {
+                div()
+                    .absolute()
+                    .left(px(16.))
+                    .top(px(16.))
+                    .size(px(32.))
+                    .filter_grayscale(1.)
+                    .child(div().size_full().bg(rgb(0xff0000)))
+                    .into_any_element()
+            });
+            // Red's luminance, 0.2126 of full.
+            assert_near(name, rgb_at(&image, scale, 32., 32.), [54, 54, 54]);
+            assert_near(name, rgb_at(&image, scale, 4., 4.), [0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn brightness_scales_a_box_and_its_border() {
+        for (name, renderer) in RENDERERS {
+            let (image, scale) = draw(renderer, || {
+                red_box()
+                    .left(px(16.))
+                    .top(px(16.))
+                    .size(px(32.))
+                    .border_4()
+                    .border_color(rgb(0x00ff00))
+                    .filter_brightness(0.5)
+                    .into_any_element()
+            });
+            assert_near(name, rgb_at(&image, scale, 32., 32.), [128, 0, 0]);
+            assert_near(name, rgb_at(&image, scale, 18., 32.), [0, 128, 0]);
+        }
+    }
+
+    #[test]
+    fn an_image_takes_its_ancestors_filters() {
+        for (name, renderer) in RENDERERS {
+            let (image, scale) = draw(renderer, || {
+                // 8 by 8 of opaque red, in the BGRA order images are kept in.
+                let red = image::RgbaImage::from_fn(8, 8, |_, _| image::Rgba([0, 0, 255, 255]));
+                let red = Arc::new(RenderImage::new([image::Frame::new(red)]));
+                div()
+                    .absolute()
+                    .left(px(16.))
+                    .top(px(16.))
+                    .size(px(32.))
+                    .filter_grayscale(1.)
+                    .filter_brightness(2.)
+                    .child(img(red).size_full())
+                    .into_any_element()
+            });
+            // Gray at red's luminance, doubled.
+            assert_near(name, rgb_at(&image, scale, 32., 32.), [108, 108, 108]);
         }
     }
 }

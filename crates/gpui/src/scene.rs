@@ -1240,9 +1240,11 @@ impl From<SubpixelSprite> for Primitive {
 #[expect(missing_docs)]
 pub struct PolychromeSprite {
     pub order: DrawOrder,
-    pub pad: u32,
+    /// What the image's colors are multiplied by, as [`crate::ColorFilter::brightness`].
+    pub brightness: f32,
     pub tile: AtlasTile,
-    pub grayscale: PaddedBool32,
+    /// How far the image is grayed, as [`crate::ColorFilter::grayscale`].
+    pub grayscale: f32,
     pub opacity: f32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,

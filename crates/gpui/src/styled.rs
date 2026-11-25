@@ -755,6 +755,21 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Grays this element and its children by `amount`, from 0 (unchanged) to 1 (fully gray),
+    /// as CSS's `filter: grayscale()`. Video surfaces are not grayed.
+    fn filter_grayscale(mut self, amount: f32) -> Self {
+        self.style().grayscale = Some(amount);
+        self
+    }
+
+    /// Multiplies the colors of this element and its children by `amount`: 0 is black, 1
+    /// unchanged, above 1 brighter, as CSS's `filter: brightness()`. Video surfaces are not
+    /// brightened.
+    fn filter_brightness(mut self, amount: f32) -> Self {
+        self.style().brightness = Some(amount);
+        self
+    }
+
     /// Scales, rotates and moves this element and its children where they are painted and hit
     /// tested, about the element's center, leaving layout unchanged. As CSS's `transform`.
     fn transform(mut self, transformation: Transformation) -> Self {

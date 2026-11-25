@@ -9,22 +9,23 @@ use crate::taffy::TaffyLayoutEngine;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AtlasTile, AvailableSpace, BackdropBlur, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
-    Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintedPath, Path,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, ScrollDelta, ScrollEvent, Shadow, SharedString, Size,
-    SpriteAnimation, SpriteAnimationId, StrikethroughStyle, Style, SubpixelSprite, Subscription,
-    SystemWindowTab, SystemWindowTabController, TabStopMap, Task, TextInputConfiguration,
-    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
-    TransformationMatrix, Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams,
-    WindowTextSystem, WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
+    BoxShadow, Capslock, ColorFilter, Context, Corners, CursorHideMode, CursorStyle, Decorations,
+    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
+    Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
+    GpuSpecs, Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent,
+    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers,
+    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
+    PaintedPath, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene,
+    ScrollDelta, ScrollEvent, Shadow, SharedString, Size, SpriteAnimation, SpriteAnimationId,
+    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControls, WindowDecorations, WindowInsets, WindowOptions, WindowParams, WindowTextSystem,
+    WindowVisibility, point, prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -1264,6 +1265,7 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    pub(crate) element_filter: ColorFilter,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2470,6 +2472,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            element_filter: ColorFilter::default(),
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -3793,9 +3796,9 @@ impl Window {
             pad: 0,
             bounds: self.underline_bounds(origin, width, style),
             content_mask: self.snapped_content_mask(),
-            color: style
-                .color
-                .unwrap_or_default()
+            color: self
+                .element_filter
+                .apply(style.color.unwrap_or_default())
                 .opacity(self.element_opacity()),
             thickness: self.snap_stroke(style.thickness),
             wavy: style.wavy.into(),
@@ -4804,21 +4807,27 @@ impl Window {
         result
     }
 
-    pub(crate) fn with_element_opacity<R>(
+    /// Fades, grays and brightens what `f` paints, on top of what its ancestors do.
+    pub(crate) fn with_element_effects<R>(
         &mut self,
         opacity: Option<f32>,
+        grayscale: Option<f32>,
+        brightness: Option<f32>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.invalidator.debug_assert_paint_or_prepaint();
 
-        let Some(opacity) = opacity else {
+        if opacity.is_none() && grayscale.is_none() && brightness.is_none() {
             return f(self);
-        };
+        }
 
         let previous_opacity = self.element_opacity;
-        self.element_opacity = previous_opacity * opacity;
+        let previous_filter = self.element_filter;
+        self.element_opacity = previous_opacity * opacity.unwrap_or(1.);
+        self.element_filter = previous_filter.then(grayscale, brightness);
         let result = f(self);
         self.element_opacity = previous_opacity;
+        self.element_filter = previous_filter;
         result
     }
 
@@ -5172,7 +5181,7 @@ impl Window {
                 bounds: shape_bounds.dilate(blur_radius * 3.),
                 content_mask,
                 corner_radii: Corners::default(),
-                color: shadow.color.opacity(opacity),
+                color: self.element_filter.apply(shadow.color).opacity(opacity),
                 shape_bounds,
                 shape_corner_radii: corner_radii.scale(scale_factor),
                 inset: false.into(),
@@ -5203,7 +5212,9 @@ impl Window {
             radius: radius.scale(scale_factor) * scale,
             bounds,
             content_mask,
-            corner_radii: corner_radii.scale(scale_factor).map(|radius| *radius * scale),
+            corner_radii: corner_radii
+                .scale(scale_factor)
+                .map(|radius| *radius * scale),
         });
     }
 
@@ -5243,7 +5254,7 @@ impl Window {
                 bounds: element_bounds,
                 content_mask,
                 corner_radii: element_corner_radii,
-                color: shadow.color.opacity(opacity),
+                color: self.element_filter.apply(shadow.color).opacity(opacity),
                 shape_bounds: self.cover_bounds(hole),
                 shape_corner_radii: hole_corner_radii.scale(scale_factor),
                 inset: true.into(),
@@ -5313,8 +5324,11 @@ impl Window {
             order: 0,
             bounds: snapped_bounds,
             content_mask: self.snapped_content_mask(),
-            background: quad.background.opacity(opacity),
-            border_color: quad.border_color.opacity(opacity),
+            background: quad.background.filter(self.element_filter).opacity(opacity),
+            border_color: self
+                .element_filter
+                .apply(quad.border_color)
+                .opacity(opacity),
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
@@ -5429,7 +5443,7 @@ impl Window {
             path,
             scale_factor,
             content_mask,
-            color.opacity(opacity),
+            color.filter(self.element_filter).opacity(opacity),
         ));
     }
 
@@ -5472,7 +5486,10 @@ impl Window {
             bounds,
             content_mask: self.snapped_content_mask(),
             thickness: self.snap_stroke(style.thickness),
-            color: style.color.unwrap_or_default().opacity(opacity),
+            color: self
+                .element_filter
+                .apply(style.color.unwrap_or_default())
+                .opacity(opacity),
             wavy: false.into(),
         });
     }
@@ -5544,7 +5561,7 @@ impl Window {
                     pad: 0,
                     bounds,
                     content_mask,
-                    color: color.opacity(element_opacity),
+                    color: self.element_filter.apply(color).opacity(element_opacity),
                     tile,
                     transformation: TransformationMatrix::unit(),
                 });
@@ -5554,7 +5571,7 @@ impl Window {
                     animation: SpriteAnimationId::NONE,
                     bounds,
                     content_mask,
-                    color: color.opacity(element_opacity),
+                    color: self.element_filter.apply(color).opacity(element_opacity),
                     tile,
                     transformation: TransformationMatrix::unit(),
                 });
@@ -5634,8 +5651,8 @@ impl Window {
 
             self.next_frame.scene.insert_primitive(PolychromeSprite {
                 order: 0,
-                pad: 0,
-                grayscale: false.into(),
+                brightness: self.element_filter.brightness,
+                grayscale: self.element_filter.grayscale,
                 bounds,
                 corner_radii: Default::default(),
                 content_mask,
@@ -5718,7 +5735,7 @@ impl Window {
             animation: SpriteAnimationId::NONE,
             bounds: final_bounds,
             content_mask,
-            color: color.opacity(element_opacity),
+            color: self.element_filter.apply(color).opacity(element_opacity),
             tile,
             transformation,
         };
@@ -5825,11 +5842,12 @@ impl Window {
             .clamp_radii_for_quad_size(visible_bounds.size)
             .scale(self.scale_factor());
         let opacity = self.element_opacity();
+        let filter = self.element_filter.then(grayscale.then_some(1.), None);
 
         self.next_frame.scene.insert_primitive(PolychromeSprite {
             order: 0,
-            pad: 0,
-            grayscale: grayscale.into(),
+            brightness: filter.brightness,
+            grayscale: filter.grayscale,
             bounds: visible_bounds_snapped,
             content_mask,
             corner_radii,
@@ -6576,14 +6594,20 @@ impl Window {
     /// listeners alone, until it ends. Claimed at
     /// [`TouchPhase::Started`](crate::TouchPhase), the recognizer never sees it.
     pub fn claim_touch(&mut self, id: TouchId) {
-        if !self.claimed_touches.iter().any(|(claimed, _)| *claimed == id) {
+        if !self
+            .claimed_touches
+            .iter()
+            .any(|(claimed, _)| *claimed == id)
+        {
             self.claimed_touches.push((id, false));
         }
     }
 
     /// Whether a listener claimed touch `id` ([`Self::claim_touch`]).
     pub fn touch_claimed(&self, id: TouchId) -> bool {
-        self.claimed_touches.iter().any(|(claimed, _)| *claimed == id)
+        self.claimed_touches
+            .iter()
+            .any(|(claimed, _)| *claimed == id)
     }
 
     /// Gives a raw touch event to the `TouchEvent` listeners, then, unless one
@@ -10468,7 +10492,10 @@ mod tests {
         let seen = Rc::new(RefCell::new(RawTouches::default()));
         let window = cx.add_window({
             let seen = seen.clone();
-            move |_, _| RawTouchListener { seen, claim_at: Some(0) }
+            move |_, _| RawTouchListener {
+                seen,
+                claim_at: Some(0),
+            }
         });
         let touch = TouchId(1);
         dispatch_touch(window, cx, touch, TouchPhase::Started, 0.);
@@ -10839,8 +10866,8 @@ mod tests {
             let origin = point(px(-1.25), px(9.25));
             let width = px(24.);
             window.with_content_mask(Some(mask), |window| {
-                window.with_element_opacity(Some(0.5), |window| {
-                    window.with_element_opacity(Some(0.5), |window| {
+                window.with_element_effects(Some(0.5), None, None, |window| {
+                    window.with_element_effects(Some(0.5), None, None, |window| {
                         let original = paint_test_underlines(window, |window| {
                             window.paint_underline(origin, width, &style);
                         })[0];
@@ -11967,7 +11994,9 @@ mod transformation_tests {
             .translate(point(ScaledPixels(7.), ScaledPixels(-3.)))
             .rotate(radians(0.6))
             .scale(size(2., 0.5));
-        let inverse = transformation.inverse().expect("an invertible transformation");
+        let inverse = transformation
+            .inverse()
+            .expect("an invertible transformation");
         let point = point(px(11.), px(5.));
         let back = inverse.apply(transformation.apply(point));
         assert!((back.x.0 - point.x.0).abs() < 1e-4 && (back.y.0 - point.y.0).abs() < 1e-4);

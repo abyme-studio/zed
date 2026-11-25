@@ -887,7 +887,12 @@ pub enum PatternLines {
 
 /// Creates a background of lines `width` wide every `size` from the bounds' top left corner, in
 /// scaled pixels as [`checkerboard`]'s size: CSS's tiled `linear-gradient` grid lines.
-pub fn pattern_lines(color: impl Into<Hsla>, size: f32, width: f32, lines: PatternLines) -> Background {
+pub fn pattern_lines(
+    color: impl Into<Hsla>,
+    size: f32,
+    width: f32,
+    lines: PatternLines,
+) -> Background {
     let mut background = Background {
         tag: BackgroundTag::PatternLines,
         solid: color.into(),
@@ -1034,6 +1039,22 @@ impl Background {
         background
     }
 
+    /// The background with `filter` applied to its colors.
+    pub fn filter(&self, filter: ColorFilter) -> Self {
+        if filter.is_identity() {
+            return *self;
+        }
+        let mut background = *self;
+        // A radial gradient's `solid` is its centre and radii, no colour.
+        if self.tag != BackgroundTag::RadialGradient {
+            background.solid = filter.apply(self.solid);
+        }
+        for stop in &mut background.colors {
+            stop.color = filter.apply(stop.color);
+        }
+        background
+    }
+
     /// Returns whether the background color is transparent.
     pub fn is_transparent(&self) -> bool {
         match self.tag {
@@ -1175,8 +1196,114 @@ mod tests {
         let to = linear_color_stop(Hsla::transparent_black(), 1.0);
         let background = radial_gradient((10.0, 20.0), (40.0, 30.0), from, to, 1.0).opacity(0.5);
         assert_eq!(background.tag, BackgroundTag::RadialGradient);
-        assert_eq!((background.solid.h, background.solid.s, background.solid.l, background.solid.a), (10.0, 20.0, 40.0, 30.0));
+        assert_eq!(
+            (
+                background.solid.h,
+                background.solid.s,
+                background.solid.l,
+                background.solid.a
+            ),
+            (10.0, 20.0, 40.0, 30.0)
+        );
         assert_eq!(background.colors[0].color.a, 0.5);
         assert!(!background.is_transparent());
+    }
+}
+
+/// Grayscale and brightness, as CSS's `filter: grayscale() brightness()`, for the colors an
+/// element and its children paint. The two commute, so their order does not matter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorFilter {
+    /// How far colors are grayed, from 0 (unchanged) to 1 (fully gray).
+    pub grayscale: f32,
+    /// What colors are multiplied by: 0 is black, 1 unchanged, above 1 brighter.
+    pub brightness: f32,
+}
+
+impl Default for ColorFilter {
+    fn default() -> Self {
+        Self {
+            grayscale: 0.,
+            brightness: 1.,
+        }
+    }
+}
+
+impl ColorFilter {
+    /// Whether the filter leaves every color as it is.
+    pub fn is_identity(&self) -> bool {
+        self.grayscale == 0. && self.brightness == 1.
+    }
+
+    /// This filter, then `grayscale` and `brightness` on top, as an element's filter applies
+    /// over its ancestors'.
+    pub fn then(self, grayscale: Option<f32>, brightness: Option<f32>) -> Self {
+        let grayscale = grayscale.unwrap_or(0.).clamp(0., 1.);
+        let brightness = brightness.unwrap_or(1.).max(0.);
+        Self {
+            grayscale: 1. - (1. - self.grayscale) * (1. - grayscale),
+            brightness: self.brightness * brightness,
+        }
+    }
+
+    /// `color` filtered: mixed toward its luminance by `grayscale`, then multiplied by
+    /// `brightness` and clamped. Its alpha is kept.
+    pub fn apply(&self, color: Hsla) -> Hsla {
+        if self.is_identity() {
+            return color;
+        }
+        let rgba = color.to_rgb();
+        let luminance = 0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b;
+        let channel =
+            |c: f32| ((c + (luminance - c) * self.grayscale) * self.brightness).clamp(0., 1.);
+        Rgba {
+            r: channel(rgba.r),
+            g: channel(rgba.g),
+            b: channel(rgba.b),
+            a: rgba.a,
+        }
+        .into()
+    }
+}
+
+#[cfg(test)]
+mod color_filter_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_grayscale_leaves_the_luminance() {
+        let filter = ColorFilter::default().then(Some(1.), None);
+        let gray = filter.apply(rgb(0xff0000).into()).to_rgb();
+        assert!((gray.r - 0.2126).abs() < 1e-3, "{gray:?}");
+        assert!((gray.g - gray.r).abs() < 1e-3 && (gray.b - gray.r).abs() < 1e-3);
+    }
+
+    #[test]
+    fn filters_compose_over_their_ancestors() {
+        let filter = ColorFilter::default()
+            .then(Some(0.5), Some(0.5))
+            .then(Some(0.5), Some(0.5));
+        assert_eq!(filter.grayscale, 0.75);
+        assert_eq!(filter.brightness, 0.25);
+        assert!(ColorFilter::default().then(None, None).is_identity());
+    }
+
+    #[test]
+    fn brightness_scales_and_clamps_the_channels() {
+        let filter = ColorFilter::default().then(None, Some(2.));
+        let color = filter
+            .apply(
+                Rgba {
+                    r: 0.75,
+                    g: 0.25,
+                    b: 0.,
+                    a: 0.5,
+                }
+                .into(),
+            )
+            .to_rgb();
+        assert!((color.r - 1.).abs() < 1e-3, "{color:?}");
+        assert!((color.g - 0.5).abs() < 1e-3, "{color:?}");
+        assert!((color.a - 0.5).abs() < 1e-3, "{color:?}");
     }
 }
