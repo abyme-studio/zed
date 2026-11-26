@@ -57,7 +57,7 @@ use std::{
     hash::{Hash, Hasher},
     marker::PhantomData,
     mem,
-    ops::Range,
+    ops::{Add, Range, Sub},
     rc::Rc,
     sync::{
         Arc, Weak,
@@ -1088,6 +1088,15 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+}
+
+/// How a cached view's output is replayed when the view is reused at another origin (view.rs),
+/// as a row in a scrolled list is: `delta` further on, under `outer`, the clip the view was drawn
+/// in, which stays put.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReuseMove {
+    pub(crate) delta: Point<Pixels>,
+    pub(crate) outer: ContentMask<Pixels>,
 }
 
 #[derive(Clone, Default)]
@@ -2656,6 +2665,45 @@ impl ContentMask<Pixels> {
             fade_from: fade.fade_from,
             fade_to: fade.fade_to,
             transform: other.transform,
+        }
+    }
+}
+
+impl<P> ContentMask<P>
+where
+    P: Copy + PartialOrd + Add<P, Output = P> + Sub<Output = P> + Debug + Default + PartialEq,
+{
+    /// This mask, recorded under `outer`, carried `delta` further on, as a cached view drawn under
+    /// `outer` is when it is reused at another origin (view.rs): `outer` stays where it is, so a
+    /// mask that is `outer` stays, and an inner clip moves and is cut to `outer` again. The rounded
+    /// rectangle and the fade move unless they are `outer`'s. Only for a mask with the unit
+    /// transformation, whose bounds are in the window's coordinates.
+    pub(crate) fn moved_under(&self, outer: &Self, delta: Point<P>) -> Self {
+        if self == outer {
+            return *self;
+        }
+        let rounded_is_outer =
+            self.rounded == outer.rounded && self.corner_radii == outer.corner_radii;
+        let fade_is_outer = self.fade_from == outer.fade_from && self.fade_to == outer.fade_to;
+        ContentMask {
+            bounds: (self.bounds + delta).intersect(&outer.bounds),
+            rounded: if rounded_is_outer {
+                self.rounded
+            } else {
+                self.rounded + delta
+            },
+            corner_radii: self.corner_radii,
+            fade_from: if fade_is_outer {
+                self.fade_from
+            } else {
+                self.fade_from + delta
+            },
+            fade_to: if fade_is_outer {
+                self.fade_to
+            } else {
+                self.fade_to + delta
+            },
+            transform: self.transform,
         }
     }
 }
@@ -4560,12 +4608,60 @@ impl Window {
         }
     }
 
+    /// Whether a cached view's output, recorded in `prepaint` and `paint` of the last frame, can be
+    /// replayed as `moved` says ([`ReuseMove`]). Not when it holds a deferred draw (placed again
+    /// from its own offset), an input handler (which holds its bounds), a hitbox under a
+    /// transformation, or a primitive [`Primitive::moved`] refuses.
+    pub(crate) fn can_reuse_moved(
+        &self,
+        prepaint: &Range<PrepaintStateIndex>,
+        paint: &Range<PaintIndex>,
+        moved: &ReuseMove,
+    ) -> bool {
+        if prepaint.start.deferred_draws_index != prepaint.end.deferred_draws_index
+            || paint.start.input_handlers_index != paint.end.input_handlers_index
+        {
+            return false;
+        }
+        let hitboxes = &self.rendered_frame.hitboxes
+            [prepaint.start.hitboxes_index..prepaint.end.hitboxes_index];
+        if hitboxes
+            .iter()
+            .any(|hitbox| hitbox.content_mask.transform != TransformationMatrix::unit())
+        {
+            return false;
+        }
+        let scale = self.scale_factor();
+        self.rendered_frame.scene.can_move(
+            paint.start.scene_index..paint.end.scene_index,
+            moved.delta.scale(scale),
+            &moved.outer.scale(scale),
+        )
+    }
+
     pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
-        self.next_frame.hitboxes.extend(
-            self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
-                .iter()
-                .cloned(),
-        );
+        self.reuse_prepaint_at(range, None);
+    }
+
+    /// [`Window::reuse_prepaint`], its hitboxes moved as `moved` says, when it is some.
+    pub(crate) fn reuse_prepaint_at(
+        &mut self,
+        range: Range<PrepaintStateIndex>,
+        moved: Option<&ReuseMove>,
+    ) {
+        let hitboxes =
+            &self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index];
+        match moved {
+            None => self.next_frame.hitboxes.extend(hitboxes.iter().cloned()),
+            Some(moved) => self
+                .next_frame
+                .hitboxes
+                .extend(hitboxes.iter().map(|hitbox| Hitbox {
+                    bounds: hitbox.bounds + moved.delta,
+                    content_mask: hitbox.content_mask.moved_under(&moved.outer, moved.delta),
+                    ..hitbox.clone()
+                })),
+        }
         self.next_frame.tooltip_requests.extend(
             self.rendered_frame.tooltip_requests
                 [range.start.tooltips_index..range.end.tooltips_index]
@@ -4627,13 +4723,22 @@ impl Window {
     }
 
     pub(crate) fn reuse_paint(&mut self, range: Range<PaintIndex>) {
+        self.reuse_paint_at(range, None);
+    }
+
+    /// [`Window::reuse_paint`], its primitives moved as `moved` says, when it is some. Cursor
+    /// styles, tooltips and tab stops follow their hitboxes and focus handles, so they need no
+    /// move. A mouse listener is a closure: one that kept its element's bounds, rather than asking
+    /// its hitbox, still reads where the element was.
+    pub(crate) fn reuse_paint_at(&mut self, range: Range<PaintIndex>, moved: Option<&ReuseMove>) {
+        let delta = moved.map_or(Point::default(), |moved| moved.delta);
         // Cached elements still exist in the frame even when their paint methods don't run.
         #[cfg(any(test, feature = "test-support"))]
         for (selector, bounds) in &self.rendered_frame.debug_bounds_records
             [range.start.debug_bounds_index..range.end.debug_bounds_index]
         {
             self.next_frame
-                .record_debug_bounds(selector.clone(), *bounds);
+                .record_debug_bounds(selector.clone(), *bounds + delta);
         }
         self.next_frame.cursor_styles.extend(
             self.rendered_frame.cursor_styles
@@ -4666,10 +4771,19 @@ impl Window {
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
-        self.next_frame.scene.replay(
-            range.start.scene_index..range.end.scene_index,
-            &self.rendered_frame.scene,
-        );
+        let scenes = range.start.scene_index..range.end.scene_index;
+        match moved {
+            None => self.next_frame.scene.replay(scenes, &self.rendered_frame.scene),
+            Some(moved) => {
+                let scale = self.scale_factor();
+                self.next_frame.scene.replay_moved(
+                    scenes,
+                    &self.rendered_frame.scene,
+                    moved.delta.scale(scale),
+                    &moved.outer.scale(scale),
+                );
+            }
+        }
     }
 
     /// Push a text style onto the stack, and call a function with that style active.
@@ -11531,6 +11645,120 @@ mod tests {
         // In the next frame the untouched leaf is reused.
         leaves[0].update(cx, |_, cx| cx.notify());
         assert_eq!(renders(cx), (3, 2));
+    }
+
+    #[gpui::test]
+    fn cached_view_moved_inside_its_clip_is_reused_where_it_lands(cx: &mut TestAppContext) {
+        struct Row {
+            renders: usize,
+        }
+
+        impl Render for Row {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.renders += 1;
+                div().size_full().bg(crate::rgb(0xff0000)).occlude()
+            }
+        }
+
+        struct Root {
+            top: Pixels,
+            row: crate::Entity<Row>,
+        }
+
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // A clip that stays put, as a scroller's does, and a row in it that moves,
+                // as its content does when it scrolls.
+                div().size_full().child(
+                    div()
+                        .relative()
+                        .size(px(200.))
+                        .overflow_hidden()
+                        .child(
+                            div().absolute().top(self.top).left(px(50.)).child(
+                                self.row
+                                    .clone()
+                                    .cached(crate::StyleRefinement::default().w(px(100.)).h(px(20.))),
+                            ),
+                        ),
+                )
+            }
+        }
+
+        let row = cx.new(|_| Row { renders: 0 });
+        let window = cx.add_window(|_, _| Root {
+            top: px(40.),
+            row: row.clone(),
+        });
+        let red = |window: &mut Window| {
+            let scale = window.scale_factor();
+            let quads: Vec<_> = window
+                .rendered_frame
+                .scene
+                .quads
+                .iter()
+                .filter(|quad| quad.background == crate::rgb(0xff0000).into())
+                .map(|quad| (quad.bounds, quad.content_mask.bounds))
+                .collect();
+            let hitboxes: Vec<_> = window
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .filter(|hitbox| hitbox.bounds.size == crate::size(px(100.), px(20.)))
+                .map(|hitbox| hitbox.bounds)
+                .collect();
+            (scale, quads, hitboxes)
+        };
+        let frame = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            let renders = cx.read(|cx| row.read(cx).renders);
+            let (scale, quads, hitboxes) = window.update(cx, |_, window, _| red(window)).unwrap();
+            (renders, scale, quads, hitboxes)
+        };
+
+        let (renders, scale, before, hitboxes_before) = frame(cx);
+        assert_eq!(renders, 1);
+        assert_eq!(before.len(), 1);
+        assert_eq!(hitboxes_before.len(), 1);
+
+        // The row moves 30 px down, still inside the clip: it isn't rendered again, and its
+        // quad and hitbox land 30 px over, its clip still the clip's.
+        window
+            .update(cx, |root, _, cx| {
+                root.top = px(70.);
+                cx.notify();
+            })
+            .unwrap();
+        let (renders, _, after, hitboxes_after) = frame(cx);
+        assert_eq!(renders, 1, "a moved row is reused");
+        assert_eq!(after.len(), 1);
+        let shift = crate::point(ScaledPixels(0.), ScaledPixels(30. * scale));
+        assert_eq!(after[0].0, before[0].0 + shift);
+        assert_eq!(after[0].1, before[0].1, "the clip stays put");
+        assert_eq!(hitboxes_after, vec![hitboxes_before[0] + crate::point(px(0.), px(30.))]);
+
+        // Moved half out of the clip, it is still reused, cut to the clip there: all of it was
+        // recorded.
+        window
+            .update(cx, |root, _, cx| {
+                root.top = px(190.);
+                cx.notify();
+            })
+            .unwrap();
+        let (renders, _, cut, _) = frame(cx);
+        assert_eq!(renders, 1, "a row moved out of the clip is reused");
+        assert_eq!(cut[0].0, before[0].0 + shift * 5.);
+        assert_eq!(cut[0].1, before[0].1);
+
+        // Moved back in from there, it is rendered again: what the clip hid was never recorded.
+        window
+            .update(cx, |root, _, cx| {
+                root.top = px(70.);
+                cx.notify();
+            })
+            .unwrap();
+        let (renders, _, _, _) = frame(cx);
+        assert_eq!(renders, 2, "a row the clip cut is rendered again");
     }
 
     #[gpui::test]

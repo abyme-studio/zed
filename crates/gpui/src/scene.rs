@@ -308,6 +308,42 @@ impl Scene {
         }
     }
 
+    /// Whether every primitive in `range` of this scene can be replayed `delta` further on under
+    /// `outer` ([`Primitive::moved`]).
+    pub(crate) fn can_move(
+        &self,
+        range: Range<usize>,
+        delta: Point<ScaledPixels>,
+        outer: &ContentMask<ScaledPixels>,
+    ) -> bool {
+        self.paint_operations[range].iter().all(|operation| match operation {
+            PaintOperation::Primitive(primitive) => primitive.moved(delta, outer).is_some(),
+            PaintOperation::StartLayer | PaintOperation::EndLayer => true,
+        })
+    }
+
+    /// [`Scene::replay`], each primitive drawn `delta` further on under `outer`. Only for a range
+    /// [`Scene::can_move`] allowed; a primitive it would refuse is replayed where it was.
+    pub(crate) fn replay_moved(
+        &mut self,
+        range: Range<usize>,
+        prev_scene: &Scene,
+        delta: Point<ScaledPixels>,
+        outer: &ContentMask<ScaledPixels>,
+    ) {
+        for operation in &prev_scene.paint_operations[range] {
+            match operation {
+                PaintOperation::Primitive(primitive) => self.insert_primitive(
+                    primitive
+                        .moved(delta, outer)
+                        .unwrap_or_else(|| primitive.clone()),
+                ),
+                PaintOperation::StartLayer => self.push_layer(),
+                PaintOperation::EndLayer => self.pop_layer(),
+            }
+        }
+    }
+
     /// How many quads come before each batch of backdrop blurs, in draw order. A renderer that
     /// draws opaque quads ahead of the rest draws them in parts cut here, so a quad above a blur
     /// is not under it.
@@ -576,6 +612,75 @@ impl Primitive {
             Primitive::NativeView(native_view) => &native_view.content_mask,
             Primitive::BackdropBlur(blur) => &blur.content_mask,
         }
+    }
+
+    /// This primitive drawn `delta` further on, recorded under `outer`, as a cached view's is when
+    /// the view is reused at another origin (view.rs): its clip is carried by
+    /// [`ContentMask::moved_under`]. `None` for what can't be carried so: a path (its tiles were
+    /// cut to what was visible), a surface or native view, an animated or transformed sprite, a
+    /// mask under a transformation, and a sprite moved by part of a device pixel (its glyph was
+    /// rasterized at its old subpixel position).
+    pub(crate) fn moved(
+        &self,
+        delta: Point<ScaledPixels>,
+        outer: &ContentMask<ScaledPixels>,
+    ) -> Option<Primitive> {
+        if self.content_mask().transform != TransformationMatrix::unit() {
+            return None;
+        }
+        let whole = delta.x.0.fract() == 0. && delta.y.0.fract() == 0.;
+        let mask = |m: &ContentMask<ScaledPixels>| m.moved_under(outer, delta);
+        Some(match self {
+            Primitive::Shadow(s) => Primitive::Shadow(Shadow {
+                bounds: s.bounds + delta,
+                shape_bounds: s.shape_bounds + delta,
+                content_mask: mask(&s.content_mask),
+                ..*s
+            }),
+            Primitive::Quad(q) => Primitive::Quad(Quad {
+                bounds: q.bounds + delta,
+                content_mask: mask(&q.content_mask),
+                ..*q
+            }),
+            Primitive::Underline(u) => Primitive::Underline(Underline {
+                bounds: u.bounds + delta,
+                content_mask: mask(&u.content_mask),
+                ..*u
+            }),
+            Primitive::MonochromeSprite(s)
+                if whole
+                    && s.animation == SpriteAnimationId::NONE
+                    && s.transformation == TransformationMatrix::unit() =>
+            {
+                Primitive::MonochromeSprite(MonochromeSprite {
+                    bounds: s.bounds + delta,
+                    content_mask: mask(&s.content_mask),
+                    ..*s
+                })
+            }
+            Primitive::SubpixelSprite(s)
+                if whole && s.transformation == TransformationMatrix::unit() =>
+            {
+                Primitive::SubpixelSprite(SubpixelSprite {
+                    bounds: s.bounds + delta,
+                    content_mask: mask(&s.content_mask),
+                    ..*s
+                })
+            }
+            Primitive::PolychromeSprite(s) if whole => {
+                Primitive::PolychromeSprite(PolychromeSprite {
+                    bounds: s.bounds + delta,
+                    content_mask: mask(&s.content_mask),
+                    ..*s
+                })
+            }
+            Primitive::BackdropBlur(b) => Primitive::BackdropBlur(BackdropBlur {
+                bounds: b.bounds + delta,
+                content_mask: mask(&b.content_mask),
+                ..*b
+            }),
+            _ => return None,
+        })
     }
 }
 

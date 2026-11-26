@@ -1,7 +1,7 @@
 use crate::{
     AnyElement, AnyEntity, AnyWeakEntity, App, AvailableSpace, Bounds, ColorFilter, ContentMask,
     Context, Element, ElementId, Entity, EntityId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, Size, Style,
+    IntoElement, LayoutId, PaintIndex, Pixels, PrepaintStateIndex, Render, RenderOnce, ReuseMove, Size, Style,
     StyleRefinement, TextStyle, WeakEntity,
 };
 use crate::{Empty, Window};
@@ -320,6 +320,9 @@ struct ViewElementState {
     prepaint_frame: u64,
     paint_frame: u64,
     cache_key: ViewElementCacheKey,
+    /// How this frame's prepaint reused the view at another origin, for its paint to replay the
+    /// same way; `None` when it was reused where it was, or drawn again.
+    paint_move: Option<ReuseMove>,
     /// The entities the view accessed while it was last drawn, in any phase,
     /// restored when its prepaint is reused so the window stays subscribed.
     accessed_entities: FxHashSet<EntityId>,
@@ -548,7 +551,7 @@ fn prepaint_view(
                 // Opacity is compared by bits so that a NaN opacity still matches itself
                 // and the view keeps using its cache.
                 if let Some(mut element_state) = element_state
-                    && element_state.cache_key.bounds == bounds
+                    && element_state.cache_key.bounds.size == bounds.size
                     && element_state.cache_key.content_mask == content_mask
                     && element_state.cache_key.text_style == text_style
                     && element_state.cache_key.opacity.to_bits() == opacity.to_bits()
@@ -557,14 +560,17 @@ fn prepaint_view(
                     && !window.refreshing
                     && element_state.prepaint_frame + 1 == window.frames_drawn
                     && element_state.paint_frame + 1 == window.frames_drawn
+                    && let Some(moved) = reuse_move(&element_state, bounds, window)
                 {
                     let prepaint_start = window.prepaint_index();
-                    window.reuse_prepaint(element_state.prepaint_range.clone());
+                    window.reuse_prepaint_at(element_state.prepaint_range.clone(), moved.as_ref());
                     cx.entities
                         .extend_accessed(element_state.accessed_entities.iter().copied());
                     let prepaint_end = window.prepaint_index();
                     element_state.prepaint_range = prepaint_start..prepaint_end;
                     element_state.prepaint_frame = window.frames_drawn;
+                    element_state.cache_key.bounds = bounds;
+                    element_state.paint_move = moved;
 
                     return (None, element_state);
                 }
@@ -590,6 +596,7 @@ fn prepaint_view(
                         paint_range: PaintIndex::default()..PaintIndex::default(),
                         prepaint_frame: window.frames_drawn,
                         paint_frame: 0,
+                        paint_move: None,
                         cache_key: ViewElementCacheKey {
                             bounds,
                             content_mask,
@@ -602,6 +609,44 @@ fn prepaint_view(
             },
         )
     })
+}
+
+/// How a cached view whose key matches but for its origin can be reused at `bounds`: `Some(None)`
+/// where it was, `Some(Some(move))` moved by the change of origin (as a row in a scrolled list
+/// is), `None` when it must be drawn again.
+///
+/// A moved view is reused only when what it recorded is all there is to move. Its primitives
+/// were cut to the clip it was drawn in, which stays put, and what that clip hid was never
+/// recorded. So the view was wholly inside the clip, or it was outside the clip and still is.
+/// A view under the mouse, before or after, is drawn again, so its hover style follows the
+/// mouse. Content that overflows the view's own bounds is taken to be inside them.
+fn reuse_move(
+    state: &ViewElementState,
+    bounds: Bounds<Pixels>,
+    window: &Window,
+) -> Option<Option<ReuseMove>> {
+    let old = state.cache_key.bounds;
+    if old.origin == bounds.origin {
+        return Some(None);
+    }
+    let outer = state.cache_key.content_mask;
+    if outer.transform != crate::TransformationMatrix::unit() {
+        return None;
+    }
+    let clip = outer.bounds;
+    let inside = old.is_contained_within(&clip);
+    let outside = !old.intersects(&clip) && !bounds.intersects(&clip);
+    let mouse = window.mouse_position();
+    if !(inside || outside) || old.contains(&mouse) || bounds.contains(&mouse) {
+        return None;
+    }
+    let moved = ReuseMove {
+        delta: bounds.origin - old.origin,
+        outer,
+    };
+    window
+        .can_reuse_moved(&state.prepaint_range, &state.paint_range, &moved)
+        .then_some(Some(moved))
 }
 
 #[inline(never)]
@@ -649,8 +694,10 @@ fn paint_view(
                         element_state.accessed_entities.extend(accessed_entities);
                         element_state.cache_key.opacity = opacity;
                         element_state.cache_key.filter = filter;
+                        element_state.paint_move = None;
                     } else {
-                        window.reuse_paint(element_state.paint_range.clone());
+                        let moved = element_state.paint_move.take();
+                        window.reuse_paint_at(element_state.paint_range.clone(), moved.as_ref());
                         if element_state.cache_key.opacity.to_bits() != opacity.to_bits()
                             || element_state.cache_key.filter != filter
                         {
