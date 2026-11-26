@@ -1,5 +1,6 @@
 use crate::{
     AssetSource, DevicePixels, IsZero, RenderImage, Result, SharedString, Size,
+    emoji_presentation::is_emoji_presentation,
     swap_rgba_pa_to_bgra,
 };
 use collections::HashMap;
@@ -34,13 +35,6 @@ const EMOJI_FONT_FAMILIES: &[&str] = &[
     target_os = "freebsd",
 )))]
 const EMOJI_FONT_FAMILIES: &[&str] = &[];
-
-fn is_emoji_presentation(c: char) -> bool {
-    static EMOJI_PRESENTATION_REGEX: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new("\\p{Emoji_Presentation}").unwrap());
-    let mut buf = [0u8; 4];
-    EMOJI_PRESENTATION_REGEX.is_match(c.encode_utf8(&mut buf))
-}
 
 fn font_has_char(db: &usvg::fontdb::Database, id: usvg::fontdb::ID, ch: char) -> bool {
     db.with_face_data(id, |font_data, face_index| {

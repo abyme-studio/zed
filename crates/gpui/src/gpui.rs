@@ -34,6 +34,7 @@ mod bounds_tree;
 mod color;
 mod element;
 mod elements;
+mod emoji_presentation;
 mod executor;
 mod geometry;
 mod gestures;
