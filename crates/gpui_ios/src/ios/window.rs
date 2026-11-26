@@ -40,7 +40,7 @@ use objc2_ui_kit::{
 };
 use objc2_ui_kit::{
     UICornerConfiguration, UICornerRadius, UIEvent, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
+    UIGestureRecognizerDelegate, UIHoverGestureRecognizer, UIPanGestureRecognizer, UIRectCorner, UIRectEdge, UIScreen,
     UIScreenEdgePanGestureRecognizer, UIScrollTypeMask, UITouch, UITraitCollection,
     UITraitEnvironment, UIUserInterfaceLayoutDirection, UIUserInterfaceStyle, UIView,
     UIViewAutoresizing, UIViewController, UIWindow, UIWindowScene,
@@ -193,6 +193,12 @@ define_class!(
                 .with_window(|window| window.handle_scroll(recognizer));
         }
 
+        #[unsafe(method(handleHover:))]
+        fn handle_hover(&self, recognizer: &UIHoverGestureRecognizer) {
+            self.ivars()
+                .with_window(|window| window.handle_hover(recognizer));
+        }
+
         #[unsafe(method(handleBackGesture:))]
         fn handle_back_gesture(&self, recognizer: &UIScreenEdgePanGestureRecognizer) {
             self.ivars()
@@ -265,8 +271,11 @@ pub(crate) struct IosWindowState {
     active_status_callback: CallbackSlot<Box<dyn FnMut(bool)>>,
     visibility: Cell<WindowVisibility>,
     visibility_callback: CallbackSlot<Box<dyn FnMut(WindowVisibility)>>,
-    /// Callback for hover status changes (not really applicable on iOS)
+    /// Callback for hover status changes: an iPad's pointer or a Pencil
+    /// entering or leaving the view.
     hover_status_callback: CallbackSlot<Box<dyn FnMut(bool)>>,
+    /// Whether a pointer or Pencil hovers over the view.
+    hovered: Cell<bool>,
     /// Callback for resize events
     resize_callback: CallbackSlot<Box<dyn FnMut(Size<Pixels>, f32)>>,
     display_id: Cell<DisplayId>,
@@ -379,6 +388,20 @@ impl IosWindow {
         scroll_recognizer.setCancelsTouchesInView(false);
         view.addGestureRecognizer(&scroll_recognizer);
 
+        // An iPad's trackpad or mouse pointer, or a Pencil above the glass,
+        // reaches a UIKit app only through a hover recognizer. It never claims
+        // a touch, so fingers keep reaching `touchesBegan`.
+        let hover_target: &AnyObject = &view;
+        // SAFETY: `MetalView` implements `handleHover:` and owns the recognizer.
+        let hover_recognizer = unsafe {
+            UIHoverGestureRecognizer::initWithTarget_action(
+                UIHoverGestureRecognizer::alloc(main_thread),
+                Some(hover_target),
+                Some(sel!(handleHover:)),
+            )
+        };
+        view.addGestureRecognizer(&hover_recognizer);
+
         // The leading-edge swipe is iOS's back gesture. The delegate lets it
         // begin only when an element claims it; it then cancels the touches it
         // took over, so GPUI's own recognizer abandons any pan it had started.
@@ -439,6 +462,7 @@ impl IosWindow {
             visibility: Cell::new(WindowVisibility::Visible),
             visibility_callback: CallbackSlot::default(),
             hover_status_callback: CallbackSlot::default(),
+            hovered: Cell::new(false),
             resize_callback: CallbackSlot::default(),
             moved_callback: CallbackSlot::default(),
             should_close_callback: CallbackSlot::default(),
@@ -555,6 +579,26 @@ impl IosWindowState {
         self.handle_keyboard_dismiss_touch(&event);
         self.input_callback
             .with(|callback| callback(PlatformInput::Touch(event)));
+    }
+
+    /// Delivers a hover of an iPad's pointer or a Pencil above the glass: a
+    /// mouse move with no button whose pointer is a mouse or a pen, and an exit
+    /// once it leaves.
+    fn handle_hover(&self, recognizer: &UIHoverGestureRecognizer) {
+        let location = recognizer.locationInView(Some(&self.view));
+        let position = Point::new(px(location.x as f32), px(location.y as f32));
+        let modifiers = hover_modifiers(recognizer);
+        let Some(input) = hover_input(recognizer.state(), position, modifiers) else {
+            return;
+        };
+        self.mouse_position.set(position);
+        self.modifiers.set(modifiers);
+        self.pointer.set(Some(hover_pointer(recognizer, &self.view)));
+        let hovered = matches!(input, PlatformInput::MouseMove(_));
+        if self.hovered.replace(hovered) != hovered {
+            self.hover_status_callback.with(|callback| callback(hovered));
+        }
+        self.input_callback.with(|callback| callback(input));
     }
 
     /// Delivers one step of a trackpad or mouse-wheel scroll gesture.
@@ -953,8 +997,7 @@ impl PlatformWindow for IosWindow {
     }
 
     fn is_hovered(&self) -> bool {
-        // Hover isn't really applicable on iOS
-        false
+        self.hovered.get()
     }
 
     fn set_title(&mut self, _title: &str) {

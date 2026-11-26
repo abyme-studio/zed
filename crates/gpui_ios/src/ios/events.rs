@@ -1,8 +1,8 @@
 //! Conversion from UIKit events to GPUI input events.
 
 use gpui::{
-    BackGestureEvent, BackGesturePhase, Modifiers, Pixels, Point, ScrollDelta, ScrollEvent,
-    ScrollSource, TouchId, TouchPhase, px,
+    BackGestureEvent, BackGesturePhase, Modifiers, MouseExitEvent, MouseMoveEvent, Pixels,
+    PlatformInput, Point, ScrollDelta, ScrollEvent, ScrollSource, TouchId, TouchPhase, px,
 };
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::NSObjectProtocol;
@@ -188,4 +188,67 @@ pub fn touch_force(touch: &UITouch) -> Option<f32> {
         return None;
     }
     Some((touch.force() / maximum_force).clamp(0.0, 1.0) as f32)
+}
+
+/// A hover's step for GPUI: while the pointer or a Pencil hovers, a mouse move
+/// with no button; once it leaves the view, a mouse exit. None for states that
+/// carry no hover.
+pub fn hover_input(
+    state: UIGestureRecognizerState,
+    position: Point<Pixels>,
+    modifiers: Modifiers,
+) -> Option<PlatformInput> {
+    match state {
+        UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed => {
+            Some(PlatformInput::MouseMove(MouseMoveEvent {
+                position,
+                pressed_button: None,
+                modifiers,
+            }))
+        }
+        UIGestureRecognizerState::Ended
+        | UIGestureRecognizerState::Cancelled
+        | UIGestureRecognizerState::Failed => Some(PlatformInput::MouseExited(MouseExitEvent {
+            position,
+            pressed_button: None,
+            modifiers,
+        })),
+        _ => None,
+    }
+}
+
+/// The keys held while a hover moves.
+pub fn hover_modifiers(recognizer: &UIHoverGestureRecognizer) -> Modifiers {
+    modifiers(recognizer.modifierFlags())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hover_moves_with_no_button_and_exits_when_it_ends() {
+        let at = Point::new(px(40.), px(120.));
+        let shift = Modifiers { shift: true, ..Default::default() };
+        for state in [UIGestureRecognizerState::Began, UIGestureRecognizerState::Changed] {
+            let Some(PlatformInput::MouseMove(event)) = hover_input(state, at, shift) else {
+                panic!("{state:?} is a move");
+            };
+            assert_eq!(event.position, at);
+            assert_eq!(event.pressed_button, None);
+            assert!(event.modifiers.shift);
+        }
+        for state in [
+            UIGestureRecognizerState::Ended,
+            UIGestureRecognizerState::Cancelled,
+            UIGestureRecognizerState::Failed,
+        ] {
+            let Some(PlatformInput::MouseExited(event)) = hover_input(state, at, shift) else {
+                panic!("{state:?} is an exit");
+            };
+            assert_eq!(event.position, at);
+            assert_eq!(event.pressed_button, None);
+        }
+        assert!(hover_input(UIGestureRecognizerState::Possible, at, shift).is_none());
+    }
 }
