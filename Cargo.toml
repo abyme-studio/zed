@@ -665,25 +665,9 @@ human_bytes = "0.4.1"
 icu_segmenter = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
 idna = "1.0"
 ignore = "0.4.22"
-# image's default features minus "avif", which only adds an encoder (rav1e);
-# decoding AVIF would additionally need the non-default "avif-native" feature.
-image = { version = "0.25.1", default-features = false, features = [
-    "bmp",
-    "dds",
-    "exr",
-    "ff",
-    "gif",
-    "hdr",
-    "ico",
-    "jpeg",
-    "png",
-    "pnm",
-    "qoi",
-    "rayon",
-    "tga",
-    "tiff",
-    "webp",
-] }
+# No formats here: gpui names the formats each target decodes (crates/gpui/Cargo.toml), every one
+# on native targets, and the web only those Tessera shows, so the tab's wasm links no other decoder.
+image = { version = "0.25.1", default-features = false }
 imara-diff = { version = "0.2", default-features = false }
 indexmap = { version = "2.7.0", features = ["serde"] }
 indoc = "2"

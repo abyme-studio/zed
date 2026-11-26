@@ -90,7 +90,6 @@ chrono = { workspace = true, default-features = true }
 profiling.workspace = true
 rand = { workspace = true, features = ["small_rng", "thread_rng"] }
 raw-window-handle.workspace = true
-regex = { workspace = true, default-features = true }
 refineable.workspace = true
 scheduler.workspace = true
 resvg.workspace = true
@@ -136,6 +135,9 @@ async-channel = { workspace = true, features = ["std"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 pollster.workspace = true
+# image's default formats minus "avif", which only adds an encoder (rav1e); decoding AVIF would
+# additionally need the non-default "avif-native" feature.
+image = { workspace = true, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows", target_os = "ios"))'.dependencies]
 async-tungstenite = { workspace = true, optional = true }
@@ -145,6 +147,8 @@ smol = { workspace = true, optional = true }
 subsecond = { version = "=0.7.10", optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+# The formats Tessera shows; another fails to decode as an unknown format, as Tessera's own does.
+image = { workspace = true, features = ["gif", "jpeg", "png", "webp"] }
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 uuid = { workspace = true, features = ["js"] }
 
@@ -184,6 +188,7 @@ gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 gpui_util.workspace = true
 lyon_extra = "1.1.0"
 rand = { workspace = true, default-features = true }
+regex = { workspace = true, default-features = true }
 scheduler = { workspace = true, features = ["test-support"] }
 util_macros.workspace = true
 
