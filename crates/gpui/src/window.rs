@@ -857,6 +857,20 @@ pub struct Hitbox {
 }
 
 impl Hitbox {
+    /// Whether `point`, in the window's coordinates, is inside the hitbox where it is drawn: a
+    /// hitbox inserted inside [`Window::with_transformation`] maps the point back through it
+    /// first. This shadows [`Bounds::contains`] on the hitbox's bounds, which are in the
+    /// coordinates the element is laid out in; use `hitbox.bounds.contains` for those.
+    pub fn contains(&self, point: &Point<Pixels>) -> bool {
+        let transform = &self.content_mask.transform;
+        if *transform == TransformationMatrix::unit() {
+            return self.bounds.contains(point);
+        }
+        transform
+            .inverse()
+            .is_some_and(|inverse| self.bounds.contains(&inverse.apply(*point)))
+    }
+
     /// Checks if the hitbox is currently hovered. Returns `false` during keyboard input modality
     /// so that keyboard navigation suppresses hover highlights. Except when handling
     /// `ScrollEvent`, this is typically what you want when determining whether to handle mouse
@@ -11958,6 +11972,28 @@ mod transformation_tests {
             ),
             [true, true, false, false]
         );
+    }
+
+    #[gpui::test]
+    fn a_hitbox_contains_a_point_where_it_is_drawn(cx: &mut TestAppContext) {
+        // Scaled to half about its center (60, 60), the box covers 55..65 of its layout's 50..70.
+        let window = cx.add_window(|_, _| Root {
+            transformation: Transformation::scale(size(0.5, 0.5)),
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let local = Bounds::new(point(px(50.), px(50.)), size(px(20.), px(20.)));
+            let hitbox = window
+                .rendered_frame
+                .hitboxes
+                .iter()
+                .find(|hitbox| hitbox.bounds == local)
+                .expect("the box's hitbox, in its own coordinates");
+            assert!(hitbox.contains(&point(px(56.), px(64.))));
+            assert!(!hitbox.contains(&point(px(52.), px(60.))));
+            assert!(hitbox.bounds.contains(&point(px(52.), px(60.))));
+        })
+        .expect("draw window");
     }
 
     #[gpui::test]
