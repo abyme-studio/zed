@@ -633,7 +633,10 @@ impl ToTaffy<taffy::style::LengthPercentageAuto> for Length {
     ) -> taffy::prelude::LengthPercentageAuto {
         match self {
             Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
-            Length::Auto => taffy::prelude::LengthPercentageAuto::auto(),
+            // A margin or an inset has no content size: CSS computes them as auto there.
+            Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent => {
+                taffy::prelude::LengthPercentageAuto::auto()
+            }
         }
     }
 }
@@ -643,6 +646,9 @@ impl ToTaffy<taffy::style::Dimension> for Length {
         match self {
             Length::Definite(length) => length.to_taffy(rem_size, scale_factor),
             Length::Auto => taffy::prelude::Dimension::auto(),
+            Length::MinContent => taffy::prelude::Dimension::min_content(),
+            Length::MaxContent => taffy::prelude::Dimension::max_content(),
+            Length::FitContent => taffy::prelude::Dimension::fit_content(),
         }
     }
 }
@@ -987,5 +993,63 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0.0, 100.0), (100.0, 100.0)]
         );
+    }
+
+    /// Lays out `parent` holding one box of width `width`, which holds two 60x10 boxes,
+    /// and answers that box's width.
+    fn content_width(parent: Style, width: Length, wrap: bool) -> f32 {
+        let mut engine = TaffyLayoutEngine::new();
+        let leaves: Vec<LayoutId> = [sized(60.0, 10.0), sized(60.0, 10.0)]
+            .into_iter()
+            .map(|style| engine.request_layout(style, Pixels(16.0), 1.0, &[]))
+            .collect();
+        let mut middle = Style::default();
+        middle.display = crate::Display::Flex;
+        if wrap {
+            middle.flex_wrap = crate::FlexWrap::Wrap;
+        }
+        middle.flex_shrink = 0.0;
+        middle.size.width = width;
+        let middle = engine.request_layout(middle, Pixels(16.0), 1.0, &leaves);
+        let root = engine.request_layout(parent, Pixels(16.0), 1.0, &[middle]);
+        engine
+            .taffy
+            .compute_layout(
+                root.into(),
+                TaffySize {
+                    width: TaffyAvailableSpace::Definite(300.0),
+                    height: TaffyAvailableSpace::Definite(300.0),
+                },
+            )
+            .unwrap();
+        engine.taffy.layout(middle.into()).unwrap().size.width
+    }
+
+    #[test]
+    fn content_sizes_reach_taffy() {
+        // A flex column 100px wide, which stretches an auto child to its width.
+        let mut column = Style::default();
+        column.display = crate::Display::Flex;
+        column.flex_direction = crate::FlexDirection::Column;
+        column.size = size(Pixels(100.0).into(), Length::Auto);
+        assert_eq!(content_width(column.clone(), Length::Auto, true), 100.0);
+        // min-content: one 60px box a line; max-content: both on one line.
+        assert_eq!(content_width(column.clone(), Length::MinContent, true), 60.0);
+        assert_eq!(content_width(column.clone(), Length::MaxContent, true), 120.0);
+        // fit-content: the 100px there is, between those two.
+        assert_eq!(content_width(column.clone(), Length::FitContent, true), 100.0);
+
+        // In a flex row 300px wide, fit-content is the content's own 120px.
+        let mut row = Style::default();
+        row.display = crate::Display::Flex;
+        row.size = size(Pixels(300.0).into(), Length::Auto);
+        assert_eq!(content_width(row.clone(), Length::FitContent, false), 120.0);
+        assert_eq!(content_width(row, Length::MinContent, true), 60.0);
+
+        // Parsed and printed as CSS writes them.
+        for word in ["min-content", "max-content", "fit-content"] {
+            let length = Length::try_from(word).unwrap();
+            assert_eq!(length.to_string(), word);
+        }
     }
 }
