@@ -224,28 +224,15 @@ define_class!(
     unsafe impl UITextInputTraits for TextInputView {
         #[unsafe(method(keyboardType))]
         fn keyboard_type(&self) -> UIKeyboardType {
-            match self.ivars().configuration.borrow().input_mode {
-                TextInputMode::Text | TextInputMode::None => UIKeyboardType::Default,
-                TextInputMode::Decimal => UIKeyboardType::DecimalPad,
-                TextInputMode::Numeric => UIKeyboardType::NumberPad,
-                TextInputMode::Tel => UIKeyboardType::PhonePad,
-                TextInputMode::Search => UIKeyboardType::WebSearch,
-                TextInputMode::Email => UIKeyboardType::EmailAddress,
-                TextInputMode::Url => UIKeyboardType::URL,
-            }
+            keyboard_type(self.ivars().configuration.borrow().input_mode)
         }
         #[unsafe(method(autocorrectionType))]
         fn autocorrection_type(&self) -> UITextAutocorrectionType {
-            if self.ivars().configuration.borrow().autocorrect { UITextAutocorrectionType::Yes } else { UITextAutocorrectionType::No }
+            autocorrection_type(self.ivars().configuration.borrow().autocorrect)
         }
         #[unsafe(method(autocapitalizationType))]
         fn autocapitalization_type(&self) -> UITextAutocapitalizationType {
-            match self.ivars().configuration.borrow().autocapitalize {
-                Autocapitalize::None => UITextAutocapitalizationType::None,
-                Autocapitalize::Words => UITextAutocapitalizationType::Words,
-                Autocapitalize::Sentences => UITextAutocapitalizationType::Sentences,
-                Autocapitalize::Characters => UITextAutocapitalizationType::AllCharacters,
-            }
+            autocapitalization_type(self.ivars().configuration.borrow().autocapitalize)
         }
         #[unsafe(method(spellCheckingType))]
         fn spell_checking_type(&self) -> UITextSpellCheckingType {
@@ -257,14 +244,7 @@ define_class!(
         }
         #[unsafe(method(returnKeyType))]
         fn return_key_type(&self) -> UIReturnKeyType {
-            match self.ivars().configuration.borrow().input_action {
-                TextInputAction::Unspecified | TextInputAction::Enter | TextInputAction::Previous => UIReturnKeyType::Default,
-                TextInputAction::Done => UIReturnKeyType::Done,
-                TextInputAction::Go => UIReturnKeyType::Go,
-                TextInputAction::Next => UIReturnKeyType::Next,
-                TextInputAction::Search => UIReturnKeyType::Search,
-                TextInputAction::Send => UIReturnKeyType::Send,
-            }
+            return_key_type(self.ivars().configuration.borrow().input_action)
         }
         /// The field's `autocomplete` as UIKit's content type: what brings password, code and
         /// contact autofill to the keyboard. None for a value UIKit has no type for.
@@ -772,9 +752,88 @@ fn checked_offset(position: usize, offset: isize, document_length: usize) -> Opt
     (position <= document_length).then_some(position)
 }
 
+/// The keyboard a field's `inputmode` asks for. iOS shows a keyboard for `none` too.
+fn keyboard_type(mode: TextInputMode) -> UIKeyboardType {
+    match mode {
+        TextInputMode::Text | TextInputMode::None => UIKeyboardType::Default,
+        TextInputMode::Decimal => UIKeyboardType::DecimalPad,
+        TextInputMode::Numeric => UIKeyboardType::NumberPad,
+        TextInputMode::Tel => UIKeyboardType::PhonePad,
+        TextInputMode::Search => UIKeyboardType::WebSearch,
+        TextInputMode::Email => UIKeyboardType::EmailAddress,
+        TextInputMode::Url => UIKeyboardType::URL,
+    }
+}
+
+fn autocorrection_type(autocorrect: bool) -> UITextAutocorrectionType {
+    if autocorrect { UITextAutocorrectionType::Yes } else { UITextAutocorrectionType::No }
+}
+
+fn autocapitalization_type(autocapitalize: Autocapitalize) -> UITextAutocapitalizationType {
+    match autocapitalize {
+        Autocapitalize::None => UITextAutocapitalizationType::None,
+        Autocapitalize::Words => UITextAutocapitalizationType::Words,
+        Autocapitalize::Sentences => UITextAutocapitalizationType::Sentences,
+        Autocapitalize::Characters => UITextAutocapitalizationType::AllCharacters,
+    }
+}
+
+/// The return key for a field's `enterkeyhint`. UIKit has no key for a line
+/// break or for going back a field, so those show its default return.
+fn return_key_type(action: TextInputAction) -> UIReturnKeyType {
+    match action {
+        TextInputAction::Unspecified | TextInputAction::Enter | TextInputAction::Previous => {
+            UIReturnKeyType::Default
+        }
+        TextInputAction::Done => UIReturnKeyType::Done,
+        TextInputAction::Go => UIReturnKeyType::Go,
+        TextInputAction::Next => UIReturnKeyType::Next,
+        TextInputAction::Search => UIReturnKeyType::Search,
+        TextInputAction::Send => UIReturnKeyType::Send,
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn each_action_and_setting_maps_to_uikit() {
+        for (action, key) in [
+            (TextInputAction::Unspecified, UIReturnKeyType::Default),
+            (TextInputAction::Enter, UIReturnKeyType::Default),
+            (TextInputAction::Previous, UIReturnKeyType::Default),
+            (TextInputAction::Done, UIReturnKeyType::Done),
+            (TextInputAction::Go, UIReturnKeyType::Go),
+            (TextInputAction::Next, UIReturnKeyType::Next),
+            (TextInputAction::Search, UIReturnKeyType::Search),
+            (TextInputAction::Send, UIReturnKeyType::Send),
+        ] {
+            assert_eq!(return_key_type(action), key, "{action:?}");
+        }
+        for (autocapitalize, kind) in [
+            (Autocapitalize::None, UITextAutocapitalizationType::None),
+            (Autocapitalize::Words, UITextAutocapitalizationType::Words),
+            (Autocapitalize::Sentences, UITextAutocapitalizationType::Sentences),
+            (Autocapitalize::Characters, UITextAutocapitalizationType::AllCharacters),
+        ] {
+            assert_eq!(autocapitalization_type(autocapitalize), kind, "{autocapitalize:?}");
+        }
+        assert_eq!(autocorrection_type(true), UITextAutocorrectionType::Yes);
+        assert_eq!(autocorrection_type(false), UITextAutocorrectionType::No);
+        for (mode, keyboard) in [
+            (TextInputMode::Text, UIKeyboardType::Default),
+            (TextInputMode::None, UIKeyboardType::Default),
+            (TextInputMode::Decimal, UIKeyboardType::DecimalPad),
+            (TextInputMode::Numeric, UIKeyboardType::NumberPad),
+            (TextInputMode::Tel, UIKeyboardType::PhonePad),
+            (TextInputMode::Search, UIKeyboardType::WebSearch),
+            (TextInputMode::Email, UIKeyboardType::EmailAddress),
+            (TextInputMode::Url, UIKeyboardType::URL),
+        ] {
+            assert_eq!(keyboard_type(mode), keyboard, "{mode:?}");
+        }
+    }
 
     #[test]
     fn insertion_geometry_has_a_visible_caret_width() {
