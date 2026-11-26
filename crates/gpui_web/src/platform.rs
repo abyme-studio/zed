@@ -235,6 +235,12 @@ async fn initialize_graphics(
     WgpuContext,
     wgpu::Surface<'static>,
 )> {
+    // Built without `webgl`, there is no WebGL2 to fall back to: `Auto` is WebGPU alone.
+    #[cfg(not(feature = "webgl"))]
+    let preference = match preference {
+        WebBackendPreference::Auto => WebBackendPreference::WebGpu,
+        other => other,
+    };
     match preference {
         WebBackendPreference::Auto => {
             let webgpu_canvas = WebWindow::prepare_canvas(browser_window)?;
@@ -346,6 +352,7 @@ impl Platform for WebPlatform {
                     window_lifecycle.set(WebWindowLifecycle::Unavailable);
                     log::error!("Failed to initialize browser graphics: {error:#}");
                     show_graphics_unavailable_message(&browser_window, &error);
+                    notify_graphics_unavailable(&browser_window, &error);
                 }
             }
         });
@@ -847,6 +854,18 @@ fn show_graphics_unavailable_message(browser_window: &web_sys::Window, error: &a
         "Failed to initialize browser graphics: {error}"
     )));
     body.append_child(&message).ok();
+}
+
+/// Tells the page the graphics failed: a `gpui:graphics-unavailable` event on the window, its
+/// `detail` the error, so a page may start another build of its module.
+fn notify_graphics_unavailable(browser_window: &web_sys::Window, error: &anyhow::Error) {
+    let init = web_sys::CustomEventInit::new();
+    init.set_detail(&format!("{error:#}").into());
+    if let Ok(event) =
+        web_sys::CustomEvent::new_with_event_init_dict("gpui:graphics-unavailable", &init)
+    {
+        browser_window.dispatch_event(&event).ok();
+    }
 }
 
 fn set_body_cursor(browser_window: &web_sys::Window, css_cursor: &str) {

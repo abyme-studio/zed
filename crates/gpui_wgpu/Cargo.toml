@@ -13,7 +13,10 @@ path = "src/gpui_wgpu.rs"
 doctest = false
 
 [features]
-default = []
+default = ["webgl"]
+# WebGL2 in a browser, beside WebGPU: on by default. Without it the wasm build draws on WebGPU alone,
+# about 0.5 MB smaller at brotli 11 (no GLSL out, wgpu-core or wgpu-hal). Natively it changes nothing.
+webgl = ["wgpu/webgl"]
 bench-support = ["gpui/bench-support", "dep:image"]
 font-kit = ["dep:font-kit"]
 test-support = ["gpui/test-support", "dep:image"]
@@ -54,7 +57,7 @@ wgpu = { workspace = true, default-features = true }
 [target.'cfg(target_family = "wasm")'.dependencies]
 js-sys.workspace = true
 web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
-wgpu = { workspace = true, features = ["webgl"] }
+wgpu = { workspace = true, features = ["webgpu", "wgsl"] }
 
 [dev-dependencies]
 criterion.workspace = true

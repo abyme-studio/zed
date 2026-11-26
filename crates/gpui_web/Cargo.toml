@@ -10,8 +10,11 @@ autoexamples = false
 workspace = true
 
 [features]
-default = ["multithreaded"]
+default = ["multithreaded", "webgl"]
 multithreaded = ["dep:wasm_thread", "scheduler/wasm-threads"]
+# WebGL2 when WebGPU has no adapter (`WebBackendPreference`): gpui_wgpu's, on by default. Without it
+# `Auto` tries WebGPU alone and fails with its named error.
+webgl = ["gpui_wgpu/webgl"]
 
 [lib]
 path = "src/gpui_web.rs"
@@ -26,7 +29,7 @@ unicode-segmentation.workspace = true
 gpui.workspace = true
 scheduler.workspace = true
 parking_lot = { workspace = true, features = ["nightly"] }
-gpui_wgpu.workspace = true
+gpui_wgpu = { path = "../gpui_wgpu", default-features = false }
 http_client.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
@@ -49,6 +52,8 @@ web-sys = { workspace = true, features = [
     "ClipboardItem",
     "CompositionEvent",
     "CssStyleDeclaration",
+    "CustomEvent",
+    "CustomEventInit",
     "DataTransfer",
     "DataTransferItem",
     "DataTransferItemList",
